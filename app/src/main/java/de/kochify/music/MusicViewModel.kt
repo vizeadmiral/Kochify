@@ -127,7 +127,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         File(downloadDir, "%(playlist_title,channel)s/%(title)s [%(id)s].%(ext)s").absolutePath
                     )
                 }
-                YoutubeDL.getInstance().execute(request) { progress, eta ->
+                YoutubeDL.getInstance().execute(request) { progress, eta, _ ->
                     viewModelScope.launch(Dispatchers.Main) {
                         downloadProgress = (progress / 100f).coerceIn(0f, 1f)
                         downloadStatus =
