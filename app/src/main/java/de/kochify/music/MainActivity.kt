@@ -1,5 +1,6 @@
 package de.kochify.music
 
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
@@ -7,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -39,11 +41,13 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NavigateBefore
 import androidx.compose.material.icons.filled.NavigateNext
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -78,15 +82,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.viewmodel.compose.viewModel
 
 private val SpotifyGreen = Color(0xFF1ED760)
 private val AppBackground = Color(0xFF0A0A0A)
 private val CardBackground = Color(0xFF181818)
 
 class MainActivity : ComponentActivity() {
+    private val musicViewModel by viewModels<MusicViewModel>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        musicViewModel.handleSpotifyCallback(intent?.data)
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -95,17 +101,24 @@ class MainActivity : ComponentActivity() {
                     surface = CardBackground
                 )
             ) {
-                MusicApp()
+                MusicApp(musicViewModel)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        musicViewModel.handleSpotifyCallback(intent.data)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MusicApp(vm: MusicViewModel = viewModel()) {
+private fun MusicApp(vm: MusicViewModel) {
     var mode by remember { mutableStateOf(LibraryMode.ALL) }
     var showDownload by remember { mutableStateOf(false) }
+    var showSpotifyImport by remember { mutableStateOf(false) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var editingTrack by remember { mutableStateOf<AudioTrack?>(null) }
     var playlistTrack by remember { mutableStateOf<AudioTrack?>(null) }
@@ -157,6 +170,7 @@ private fun MusicApp(vm: MusicViewModel = viewModel()) {
                 onBack = { vm.selectedPlaylist = null },
                 onImport = { audioPicker.launch("audio/*") },
                 onDownload = { showDownload = true },
+                onSpotifyImport = { showSpotifyImport = true },
                 onNewPlaylist = { showNewPlaylist = true }
             )
             SearchField(vm)
@@ -165,7 +179,9 @@ private fun MusicApp(vm: MusicViewModel = viewModel()) {
                 PlaylistList(
                     playlists = vm.playlists,
                     onSelect = { vm.selectedPlaylist = it },
-                    onCreate = { showNewPlaylist = true }
+                    onCreate = { showNewPlaylist = true },
+                    spotifyUrlFor = vm::spotifyPlaylistUrl,
+                    onOpenSpotify = vm::openSpotifyPlaylist
                 )
             } else {
                 TrackList(
@@ -185,6 +201,15 @@ private fun MusicApp(vm: MusicViewModel = viewModel()) {
             status = vm.downloadStatus,
             onDismiss = { if (!vm.isDownloading) showDownload = false },
             onDownload = vm::downloadFromYoutube
+        )
+    }
+    if (showSpotifyImport) {
+        SpotifyImportDialog(
+            initialClientId = vm.spotifyClientId,
+            importing = vm.isSpotifyImporting,
+            status = vm.spotifyStatus,
+            onDismiss = { if (!vm.isSpotifyImporting) showSpotifyImport = false },
+            onConnect = vm::startSpotifyImport
         )
     }
     if (showNewPlaylist) {
@@ -224,6 +249,7 @@ private fun Header(
     onBack: () -> Unit,
     onImport: () -> Unit,
     onDownload: () -> Unit,
+    onSpotifyImport: () -> Unit,
     onNewPlaylist: () -> Unit
 ) {
     Row(
@@ -252,6 +278,9 @@ private fun Header(
         }
         IconButton(onClick = onDownload) {
             Icon(Icons.Default.Download, "Link herunterladen", tint = SpotifyGreen)
+        }
+        IconButton(onClick = onSpotifyImport) {
+            Icon(Icons.Default.Sync, "Spotify-Playlists importieren", tint = SpotifyGreen)
         }
         IconButton(onClick = onNewPlaylist) {
             Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
@@ -383,7 +412,9 @@ private fun TrackRow(
 private fun PlaylistList(
     playlists: List<String>,
     onSelect: (String) -> Unit,
-    onCreate: () -> Unit
+    onCreate: () -> Unit,
+    spotifyUrlFor: (String) -> String?,
+    onOpenSpotify: (String) -> Unit
 ) {
     LazyColumn(contentPadding = PaddingValues(16.dp)) {
         item {
@@ -403,6 +434,7 @@ private fun PlaylistList(
             Spacer(Modifier.height(12.dp))
         }
         items(playlists) { playlist ->
+            val spotifyUrl = spotifyUrlFor(playlist)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -419,7 +451,25 @@ private fun PlaylistList(
                     Icon(Icons.Default.QueueMusic, null, tint = SpotifyGreen)
                 }
                 Spacer(Modifier.width(14.dp))
-                Text(playlist, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Column(Modifier.weight(1f)) {
+                    Text(playlist, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    if (spotifyUrl != null) {
+                        Text(
+                            "Von Spotify importiert",
+                            color = SpotifyGreen,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+                if (spotifyUrl != null) {
+                    IconButton(onClick = { onOpenSpotify(playlist) }) {
+                        Icon(
+                            Icons.Default.OpenInNew,
+                            "Original in Spotify öffnen",
+                            tint = SpotifyGreen
+                        )
+                    }
+                }
             }
             HorizontalDivider(color = Color(0xFF222222))
         }
@@ -521,6 +571,78 @@ private fun DownloadDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss, enabled = !downloading) { Text("Schließen") }
+        }
+    )
+}
+
+@Composable
+private fun SpotifyImportDialog(
+    initialClientId: String,
+    importing: Boolean,
+    status: String?,
+    onDismiss: () -> Unit,
+    onConnect: (String) -> Unit
+) {
+    var clientId by remember(initialClientId) { mutableStateOf(initialClientId) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Spotify-Playlists übertragen") },
+        text = {
+            Column {
+                Text(
+                    "Kochify übernimmt Playlistnamen, Titel und Interpreten. " +
+                        "Vorhandene MP3s werden zugeordnet; fehlende Titel werden für später vorgemerkt.",
+                    color = Color.LightGray
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Spotify-Audiodateien werden nicht kopiert oder heruntergeladen.",
+                    color = SpotifyGreen,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = clientId,
+                    onValueChange = { clientId = it },
+                    label = { Text("Spotify Client-ID") },
+                    supportingText = {
+                        Text("Redirect-URI im Spotify Dashboard: kochify://spotify-callback")
+                    },
+                    enabled = !importing,
+                    singleLine = true
+                )
+                if (importing) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp)
+                    )
+                }
+                status?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = Color.LightGray, fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConnect(clientId) },
+                enabled = clientId.isNotBlank() && !importing
+            ) {
+                if (importing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Text("Spotify verbinden")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !importing) {
+                Text("Schließen")
+            }
         }
     )
 }
