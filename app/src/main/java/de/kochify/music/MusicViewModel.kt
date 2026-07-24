@@ -1,11 +1,14 @@
 package de.kochify.music
 
 import android.app.Application
+import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Environment
+import android.util.Base64
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -19,10 +22,19 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.text.Normalizer
 import java.util.UUID
 
 data class AudioTrack(
@@ -35,8 +47,33 @@ data class AudioTrack(
     val playlists: Set<String> = emptySet()
 )
 
+data class PendingSpotifyTrack(
+    val playlist: String,
+    val title: String,
+    val artist: String
+)
+
+data class SpotifyPlaylistImport(
+    val name: String,
+    val spotifyUrl: String,
+    val tracks: List<PendingSpotifyTrack>
+)
+
+private const val SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
+private const val SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+private const val SPOTIFY_API_URL = "https://api.spotify.com/v1"
+private const val SPOTIFY_REDIRECT_URI = "kochify://spotify-callback"
+
+private class SpotifyHttpException(
+    val statusCode: Int,
+    message: String
+) : Exception(message)
+
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
+    private val downloaderInitMutex = Mutex()
+    @Volatile
+    private var downloaderReady = false
     private val prefs = app.getSharedPreferences("kochify_music", 0)
     private val musicDir = File(app.filesDir, "music").apply { mkdirs() }
     private val coversDir = File(app.filesDir, "covers").apply { mkdirs() }
@@ -45,6 +82,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     val tracks = mutableStateListOf<AudioTrack>()
     val playlists = mutableStateListOf<String>()
+    private val pendingSpotifyTracks = mutableStateListOf<PendingSpotifyTrack>()
+    private val spotifyPlaylistLinks = mutableStateMapOf<String, String>()
     val player = ExoPlayer.Builder(app).build()
 
     var search by mutableStateOf("")
@@ -54,6 +93,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     var downloadProgress by mutableFloatStateOf(0f)
     var downloadStatus by mutableStateOf<String?>(null)
     var isDownloading by mutableStateOf(false)
+    var spotifyStatus by mutableStateOf<String?>(null)
+    var isSpotifyImporting by mutableStateOf(false)
+    val spotifyClientId: String
+        get() = prefs.getString("spotify_client_id", "").orEmpty()
 
     init {
         load()
@@ -65,8 +108,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         })
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                YoutubeDL.getInstance().init(app)
-                FFmpeg.getInstance().init(app)
+                ensureDownloaderReady()
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     downloadStatus = "Download-Modul konnte nicht gestartet werden: ${e.message}"
@@ -113,6 +155,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                withContext(Dispatchers.Main) {
+                    downloadStatus = "Download-Modul wird gestartet …"
+                }
+                ensureDownloaderReady()
                 val before = downloadDir.listFiles()?.map { it.absolutePath }?.toSet().orEmpty()
                 val request = YoutubeDLRequest(url.trim()).apply {
                     addOption("--extract-audio")
@@ -155,6 +201,313 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun ensureDownloaderReady() {
+        if (downloaderReady) return
+        downloaderInitMutex.withLock {
+            if (downloaderReady) return@withLock
+            YoutubeDL.getInstance().init(app)
+            FFmpeg.getInstance().init(app)
+            downloaderReady = true
+        }
+    }
+
+    fun startSpotifyImport(clientId: String) {
+        val cleanClientId = clientId.trim()
+        if (cleanClientId.isEmpty()) {
+            spotifyStatus = "Bitte zuerst deine Spotify Client-ID eingeben."
+            return
+        }
+
+        val verifier = randomUrlSafe(64)
+        val state = randomUrlSafe(24)
+        val challenge = Base64.encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()),
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+        )
+        prefs.edit()
+            .putString("spotify_client_id", cleanClientId)
+            .putString("spotify_code_verifier", verifier)
+            .putString("spotify_auth_state", state)
+            .apply()
+
+        isSpotifyImporting = true
+        spotifyStatus = "Spotify-Anmeldung wird geöffnet …"
+        val authorizationUri = Uri.parse(SPOTIFY_AUTHORIZE_URL).buildUpon()
+            .appendQueryParameter("client_id", cleanClientId)
+            .appendQueryParameter("response_type", "code")
+            .appendQueryParameter("redirect_uri", SPOTIFY_REDIRECT_URI)
+            .appendQueryParameter(
+                "scope",
+                "playlist-read-private playlist-read-collaborative"
+            )
+            .appendQueryParameter("code_challenge_method", "S256")
+            .appendQueryParameter("code_challenge", challenge)
+            .appendQueryParameter("state", state)
+            .build()
+
+        runCatching {
+            app.startActivity(
+                Intent(Intent.ACTION_VIEW, authorizationUri)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.onFailure {
+            isSpotifyImporting = false
+            spotifyStatus = "Spotify-Anmeldung konnte nicht geöffnet werden."
+        }
+    }
+
+    fun handleSpotifyCallback(uri: Uri?) {
+        if (uri?.scheme != "kochify" || uri.host != "spotify-callback") return
+
+        val error = uri.getQueryParameter("error")
+        if (error != null) {
+            isSpotifyImporting = false
+            spotifyStatus = "Spotify-Anmeldung abgebrochen: $error"
+            return
+        }
+
+        val expectedState = prefs.getString("spotify_auth_state", null)
+        val receivedState = uri.getQueryParameter("state")
+        val code = uri.getQueryParameter("code")
+        val clientId = spotifyClientId
+        val verifier = prefs.getString("spotify_code_verifier", null)
+        if (receivedState != expectedState || code.isNullOrBlank() ||
+            clientId.isBlank() || verifier.isNullOrBlank()
+        ) {
+            isSpotifyImporting = false
+            spotifyStatus = "Spotify-Anmeldung konnte nicht sicher bestätigt werden."
+            return
+        }
+
+        isSpotifyImporting = true
+        spotifyStatus = "Spotify-Playlists werden geladen …"
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val tokenResponse = postForm(
+                    SPOTIFY_TOKEN_URL,
+                    mapOf(
+                        "client_id" to clientId,
+                        "grant_type" to "authorization_code",
+                        "code" to code,
+                        "redirect_uri" to SPOTIFY_REDIRECT_URI,
+                        "code_verifier" to verifier
+                    )
+                )
+                val accessToken = tokenResponse.getString("access_token")
+                val importedPlaylists = loadSpotifyPlaylists(accessToken)
+                applySpotifyPlaylists(importedPlaylists)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    spotifyStatus =
+                        "Spotify-Import fehlgeschlagen: ${e.message ?: "Unbekannter Fehler"}"
+                }
+            } finally {
+                prefs.edit()
+                    .remove("spotify_code_verifier")
+                    .remove("spotify_auth_state")
+                    .apply()
+                withContext(Dispatchers.Main) { isSpotifyImporting = false }
+            }
+        }
+    }
+
+    private fun loadSpotifyPlaylists(
+        accessToken: String
+    ): List<SpotifyPlaylistImport> {
+        val imported = mutableListOf<SpotifyPlaylistImport>()
+        var nextPlaylistsUrl: String? = "$SPOTIFY_API_URL/me/playlists?limit=50"
+
+        while (!nextPlaylistsUrl.isNullOrBlank()) {
+            val page = getJson(nextPlaylistsUrl, accessToken)
+            val playlistItems = page.optJSONArray("items") ?: JSONArray()
+            repeat(playlistItems.length()) playlistLoop@ { playlistIndex ->
+                val playlist =
+                    playlistItems.optJSONObject(playlistIndex) ?: return@playlistLoop
+                val name = playlist.optString("name").trim()
+                val id = playlist.optString("id").trim()
+                if (name.isEmpty() || id.isEmpty()) return@playlistLoop
+                val spotifyUrl = playlist.optJSONObject("external_urls")
+                    ?.optString("spotify")
+                    .orEmpty()
+
+                val playlistTracks = mutableListOf<PendingSpotifyTrack>()
+                var nextItemsUrl: String? =
+                    "$SPOTIFY_API_URL/playlists/$id/items?limit=50"
+                try {
+                    while (!nextItemsUrl.isNullOrBlank()) {
+                        val itemPage = getJson(nextItemsUrl, accessToken)
+                        val items = itemPage.optJSONArray("items") ?: JSONArray()
+                        repeat(items.length()) itemLoop@ { itemIndex ->
+                            val wrapper =
+                                items.optJSONObject(itemIndex) ?: return@itemLoop
+                            val item = wrapper.optJSONObject("item")
+                                ?: wrapper.optJSONObject("track")
+                                ?: return@itemLoop
+                            if (item.optString("type", "track") != "track") {
+                                return@itemLoop
+                            }
+                            val title = item.optString("name").trim()
+                            val artists = item.optJSONArray("artists") ?: JSONArray()
+                            val artist = buildList {
+                                repeat(artists.length()) { artistIndex ->
+                                    artists.optJSONObject(artistIndex)
+                                        ?.optString("name")
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let(::add)
+                                }
+                            }.joinToString(", ")
+                            if (title.isNotEmpty()) {
+                                playlistTracks += PendingSpotifyTrack(
+                                    playlist = name,
+                                    title = title,
+                                    artist = artist.ifBlank { "Unbekannter Interpret" }
+                                )
+                            }
+                        }
+                        nextItemsUrl = itemPage.optString("next").takeIf { it.isNotBlank() }
+                    }
+                    imported += SpotifyPlaylistImport(
+                        name = name,
+                        spotifyUrl = spotifyUrl,
+                        tracks = playlistTracks
+                    )
+                } catch (e: SpotifyHttpException) {
+                    // Spotify erlaubt den neuen Items-Endpunkt nur für eigene
+                    // oder gemeinsam bearbeitete Playlists. Andere werden übersprungen.
+                    if (e.statusCode != 403) throw e
+                }
+            }
+            nextPlaylistsUrl = page.optString("next").takeIf { it.isNotBlank() }
+        }
+        return imported
+    }
+
+    private suspend fun applySpotifyPlaylists(
+        imported: List<SpotifyPlaylistImport>
+    ) = withContext(Dispatchers.Main) {
+        var matched = 0
+        var missing = 0
+        imported.forEach { spotifyPlaylist ->
+            val playlistName = spotifyPlaylist.name
+            val importedTracks = spotifyPlaylist.tracks
+            if (playlistName !in playlists) playlists.add(playlistName)
+            if (spotifyPlaylist.spotifyUrl.isNotBlank()) {
+                spotifyPlaylistLinks[playlistName] = spotifyPlaylist.spotifyUrl
+            }
+            importedTracks.forEach { spotifyTrack ->
+                val trackIndex = tracks.indexOfFirst {
+                    spotifyMatches(it.title, it.artist, spotifyTrack.title, spotifyTrack.artist)
+                }
+                if (trackIndex >= 0) {
+                    val localTrack = tracks[trackIndex]
+                    tracks[trackIndex] = localTrack.copy(
+                        playlists = localTrack.playlists + playlistName
+                    )
+                    matched++
+                } else {
+                    val exists = pendingSpotifyTracks.any {
+                        it.playlist == playlistName &&
+                            spotifyMatches(
+                                it.title,
+                                it.artist,
+                                spotifyTrack.title,
+                                spotifyTrack.artist
+                            )
+                    }
+                    if (!exists) pendingSpotifyTracks.add(spotifyTrack)
+                    missing++
+                }
+            }
+        }
+        save()
+        spotifyStatus =
+            "${imported.size} Spotify-Playlist(s) übertragen: " +
+                "$matched vorhandene Titel zugeordnet, $missing für später vorgemerkt."
+    }
+
+    private fun getJson(url: String, accessToken: String): JSONObject {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 20_000
+            readTimeout = 30_000
+            setRequestProperty("Authorization", "Bearer $accessToken")
+            setRequestProperty("Accept", "application/json")
+        }
+        return readJsonResponse(connection)
+    }
+
+    private fun postForm(url: String, fields: Map<String, String>): JSONObject {
+        val body = fields.entries.joinToString("&") { (key, value) ->
+            "${urlEncode(key)}=${urlEncode(value)}"
+        }
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 20_000
+            readTimeout = 30_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            setRequestProperty("Accept", "application/json")
+        }
+        connection.outputStream.use {
+            it.write(body.toByteArray(StandardCharsets.UTF_8))
+        }
+        return readJsonResponse(connection)
+    }
+
+    private fun readJsonResponse(connection: HttpURLConnection): JSONObject {
+        val status = connection.responseCode
+        val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
+            ?.bufferedReader()
+            ?.use { it.readText() }
+            .orEmpty()
+        connection.disconnect()
+        if (status !in 200..299) {
+            val message = runCatching {
+                JSONObject(response).optJSONObject("error")?.optString("message")
+                    ?: JSONObject(response).optString("error_description")
+            }.getOrNull().orEmpty()
+            throw SpotifyHttpException(
+                status,
+                if (message.isBlank()) "Spotify-Fehler $status" else message
+            )
+        }
+        return JSONObject(response)
+    }
+
+    private fun randomUrlSafe(byteCount: Int): String {
+        val bytes = ByteArray(byteCount)
+        SecureRandom().nextBytes(bytes)
+        return Base64.encodeToString(
+            bytes,
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+        )
+    }
+
+    private fun urlEncode(value: String): String =
+        URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
+    private fun spotifyMatches(
+        localTitle: String,
+        localArtist: String,
+        spotifyTitle: String,
+        spotifyArtist: String
+    ): Boolean {
+        val titleMatches = normalized(localTitle) == normalized(spotifyTitle)
+        val localArtistKey = normalized(localArtist)
+        val spotifyArtistKey = normalized(spotifyArtist)
+        val artistMatches = localArtistKey.isBlank() || spotifyArtistKey.isBlank() ||
+            localArtistKey.contains(spotifyArtistKey) ||
+            spotifyArtistKey.contains(localArtistKey)
+        return titleMatches && artistMatches
+    }
+
+    private fun normalized(value: String): String = Normalizer
+        .normalize(value.lowercase(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .replace(Regex("\\s*\\([^)]*\\)"), "")
+        .replace(Regex("\\s*\\[[^]]*]"), "")
+        .replace(Regex("[^\\p{L}\\p{N}]"), "")
+
     fun play(track: AudioTrack) {
         currentTrack = track
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(track.path))))
@@ -185,6 +538,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (clean.isNotEmpty() && clean !in playlists) {
             playlists.add(clean)
             save()
+        }
+    }
+
+    fun spotifyPlaylistUrl(name: String): String? = spotifyPlaylistLinks[name]
+
+    fun openSpotifyPlaylist(name: String) {
+        val url = spotifyPlaylistLinks[name] ?: return
+        runCatching {
+            app.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
         }
     }
 
@@ -260,7 +625,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
         viewModelScope.launch(Dispatchers.Main) {
             if (tracks.none { it.path == file.absolutePath }) {
-                tracks.add(track)
+                val assignments = pendingSpotifyTracks.filter {
+                    spotifyMatches(track.title, track.artist, it.title, it.artist)
+                }
+                val assignedTrack = track.copy(
+                    playlists = track.playlists + assignments.map { it.playlist }
+                )
+                pendingSpotifyTracks.removeAll(assignments.toSet())
+                tracks.add(assignedTrack)
                 save()
             }
         }
@@ -322,6 +694,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
             val storedPlaylists = JSONArray(prefs.getString("playlists", "[]"))
             repeat(storedPlaylists.length()) { playlists.add(storedPlaylists.getString(it)) }
+
+            val pending = JSONArray(prefs.getString("spotify_pending_tracks", "[]"))
+            repeat(pending.length()) { index ->
+                val item = pending.getJSONObject(index)
+                pendingSpotifyTracks.add(
+                    PendingSpotifyTrack(
+                        playlist = item.getString("playlist"),
+                        title = item.getString("title"),
+                        artist = item.optString("artist", "Unbekannter Interpret")
+                    )
+                )
+            }
+
+            val spotifyLinks = JSONObject(
+                prefs.getString("spotify_playlist_links", "{}").orEmpty().ifBlank { "{}" }
+            )
+            val linkNames = spotifyLinks.keys()
+            while (linkNames.hasNext()) {
+                val name = linkNames.next()
+                spotifyLinks.optString(name)
+                    .takeIf { it.isNotBlank() }
+                    ?.let { spotifyPlaylistLinks[name] = it }
+            }
         }
     }
 
@@ -341,6 +736,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit()
             .putString("tracks", array.toString())
             .putString("playlists", JSONArray(playlists.toList()).toString())
+            .putString(
+                "spotify_pending_tracks",
+                JSONArray().apply {
+                    pendingSpotifyTracks.forEach { pending ->
+                        put(JSONObject().apply {
+                            put("playlist", pending.playlist)
+                            put("title", pending.title)
+                            put("artist", pending.artist)
+                        })
+                    }
+                }.toString()
+            )
+            .putString(
+                "spotify_playlist_links",
+                JSONObject().apply {
+                    spotifyPlaylistLinks.forEach { (name, url) -> put(name, url) }
+                }.toString()
+            )
             .apply()
     }
 
