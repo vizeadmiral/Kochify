@@ -94,6 +94,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     var selectedPlaylist by mutableStateOf<String?>(null)
     var currentTrack by mutableStateOf<AudioTrack?>(null)
     var isPlaying by mutableStateOf(false)
+    var shuffleEnabled by mutableStateOf(prefs.getBoolean("shuffle_enabled", false))
+    var repeatOneEnabled by mutableStateOf(prefs.getBoolean("repeat_one_enabled", false))
     var downloadProgress by mutableFloatStateOf(0f)
     var downloadStatus by mutableStateOf<String?>(null)
     var isDownloading by mutableStateOf(false)
@@ -105,9 +107,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     init {
         load()
         scanDownloadedFiles()
+        player.repeatMode =
+            if (repeatOneEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(value: Boolean) {
                 isPlaying = value
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED && !repeatOneEnabled) {
+                    next()
+                }
             }
         })
         viewModelScope.launch(Dispatchers.IO) {
@@ -577,10 +587,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (player.isPlaying) player.pause() else player.play()
     }
 
+    fun toggleShuffle() {
+        shuffleEnabled = !shuffleEnabled
+        prefs.edit().putBoolean("shuffle_enabled", shuffleEnabled).apply()
+    }
+
+    fun toggleRepeatOne() {
+        repeatOneEnabled = !repeatOneEnabled
+        player.repeatMode =
+            if (repeatOneEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        prefs.edit().putBoolean("repeat_one_enabled", repeatOneEnabled).apply()
+    }
+
     fun next() {
         val current = currentTrack ?: return
+        if (tracks.isEmpty()) return
+        if (shuffleEnabled && tracks.size > 1) {
+            val candidates = tracks.filter { it.id != current.id }
+            play(candidates.random())
+            return
+        }
         val index = tracks.indexOfFirst { it.id == current.id }
-        if (tracks.isNotEmpty()) play(tracks[(index + 1).mod(tracks.size)])
+        play(tracks[(index + 1).mod(tracks.size)])
     }
 
     fun previous() {
