@@ -8,8 +8,28 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - MP3-Import über den Android-Dateidialog
 - Suche, Favoriten und eigene Playlists
 - bearbeitbaren Titeln, Interpreten und Covern
+- Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
 - sichtbarer Rechtebestätigung vor jedem Link-Download
+
+## Spotify-Playlists importieren
+
+Kochify nutzt die offizielle Spotify-Anmeldung mit Authorization Code und PKCE.
+Spotify-Audiodateien werden nicht kopiert. Playlistnamen, Titel und Interpreten
+werden übernommen und mit vorhandenen MP3s abgeglichen. Fehlende Titel bleiben
+vorgemerkt und werden beim späteren MP3-Import automatisch einsortiert.
+
+Einmalige Einrichtung:
+
+1. Im [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+   eine App für Kochify erstellen.
+2. In den App-Einstellungen als Redirect-URI
+   `kochify://spotify-callback` eintragen.
+3. Die dort angezeigte Client-ID kopieren.
+4. In Kochify auf das grüne Synchronisieren-Symbol drücken, die Client-ID
+   eintragen und „Spotify verbinden“ wählen.
+
+Für die Handyapp wird kein Spotify Client Secret verwendet oder gespeichert.
 
 ## APK in Android Studio erzeugen
 
