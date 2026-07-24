@@ -46,7 +46,9 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -478,31 +480,70 @@ private fun PlaylistList(
 
 @Composable
 private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF252525))
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
-        Cover(track.coverPath, 46)
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
-            Text(track.artist, maxLines = 1, color = Color.LightGray, fontSize = 12.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Cover(track.coverPath, 42)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    track.title,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    track.artist,
+                    maxLines = 1,
+                    color = Color.LightGray,
+                    fontSize = 12.sp
+                )
+            }
         }
-        IconButton(onClick = vm::previous) { Icon(Icons.Default.NavigateBefore, "Zurück") }
-        FilledIconButton(
-            onClick = vm::togglePlayback,
-            colors = IconButtonDefaults.filledIconButtonColors(containerColor = SpotifyGreen)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                if (vm.isPlaying) "Pause" else "Abspielen",
-                tint = Color.Black
-            )
+            IconButton(onClick = vm::toggleShuffle) {
+                Icon(
+                    Icons.Default.Shuffle,
+                    if (vm.shuffleEnabled) "Shuffle ausschalten" else "Shuffle einschalten",
+                    tint = if (vm.shuffleEnabled) SpotifyGreen else Color.LightGray
+                )
+            }
+            IconButton(onClick = vm::previous) {
+                Icon(Icons.Default.NavigateBefore, "Zurück")
+            }
+            FilledIconButton(
+                onClick = vm::togglePlayback,
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = SpotifyGreen)
+            ) {
+                Icon(
+                    if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    if (vm.isPlaying) "Pause" else "Abspielen",
+                    tint = Color.Black
+                )
+            }
+            IconButton(onClick = vm::next) {
+                Icon(Icons.Default.NavigateNext, "Weiter")
+            }
+            IconButton(onClick = vm::toggleRepeatOne) {
+                Icon(
+                    Icons.Default.RepeatOne,
+                    if (vm.repeatOneEnabled) {
+                        "Endloswiederholung ausschalten"
+                    } else {
+                        "Titel endlos wiederholen"
+                    },
+                    tint = if (vm.repeatOneEnabled) SpotifyGreen else Color.LightGray
+                )
+            }
         }
-        IconButton(onClick = vm::next) { Icon(Icons.Default.NavigateNext, "Weiter") }
     }
 }
 
