@@ -7,6 +7,7 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - lokaler MP3-Bibliothek und Offline-Wiedergabe
 - MP3-Import über den Android-Dateidialog
 - Suche, Favoriten und eigene Playlists
+- Shuffle, automatische Weiterschaltung und Endloswiederholung einzelner Titel
 - bearbeitbaren Titeln, Interpreten und Covern
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
