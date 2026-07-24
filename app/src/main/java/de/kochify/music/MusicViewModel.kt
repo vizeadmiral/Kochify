@@ -63,6 +63,7 @@ private const val SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authoriz
 private const val SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 private const val SPOTIFY_API_URL = "https://api.spotify.com/v1"
 private const val SPOTIFY_REDIRECT_URI = "kochify://spotify-callback"
+private const val YTDLP_UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L
 
 private class SpotifyHttpException(
     val statusCode: Int,
@@ -72,8 +73,11 @@ private class SpotifyHttpException(
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
     private val downloaderInitMutex = Mutex()
+    private val downloaderUpdateMutex = Mutex()
     @Volatile
     private var downloaderReady = false
+    @Volatile
+    private var downloaderUpdateChecked = false
     private val prefs = app.getSharedPreferences("kochify_music", 0)
     private val musicDir = File(app.filesDir, "music").apply { mkdirs() }
     private val coversDir = File(app.filesDir, "covers").apply { mkdirs() }
@@ -159,6 +163,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     downloadStatus = "Download-Modul wird gestartet …"
                 }
                 ensureDownloaderReady()
+                updateDownloaderIfNeeded()
                 val before = downloadDir.listFiles()?.map { it.absolutePath }?.toSet().orEmpty()
                 val request = YoutubeDLRequest(url.trim()).apply {
                     addOption("--extract-audio")
@@ -168,6 +173,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     addOption("--embed-thumbnail")
                     addOption("--yes-playlist")
                     addOption("--no-overwrites")
+                    addOption("--remote-components", "ejs:github")
                     addOption(
                         "-o",
                         File(downloadDir, "%(playlist_title,channel)s/%(title)s [%(id)s].%(ext)s").absolutePath
@@ -193,7 +199,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    downloadStatus = "Download fehlgeschlagen: ${e.message ?: "Unbekannter Fehler"}"
+                    downloadStatus = "Download fehlgeschlagen: ${compactDownloadError(e)}"
                 }
             } finally {
                 withContext(Dispatchers.Main) { isDownloading = false }
@@ -209,6 +215,58 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             FFmpeg.getInstance().init(app)
             downloaderReady = true
         }
+    }
+
+    private suspend fun updateDownloaderIfNeeded() {
+        if (downloaderUpdateChecked) return
+        downloaderUpdateMutex.withLock {
+            if (downloaderUpdateChecked) return@withLock
+            val now = System.currentTimeMillis()
+            val lastCheck = prefs.getLong("ytdlp_last_update_check", 0L)
+            if (now - lastCheck < YTDLP_UPDATE_INTERVAL_MS) {
+                downloaderUpdateChecked = true
+                return@withLock
+            }
+
+            withContext(Dispatchers.Main) {
+                downloadStatus = "yt-dlp wird aktualisiert …"
+            }
+            try {
+                YoutubeDL.getInstance().updateYoutubeDL(
+                    app,
+                    YoutubeDL.UpdateChannel.STABLE
+                )
+                prefs.edit().putLong("ytdlp_last_update_check", now).apply()
+                downloaderUpdateChecked = true
+                withContext(Dispatchers.Main) {
+                    val version = YoutubeDL.getInstance().version(app)
+                    downloadStatus = if (version.isNullOrBlank()) {
+                        "Download wird vorbereitet …"
+                    } else {
+                        "Downloader $version bereit …"
+                    }
+                }
+            } catch (e: Exception) {
+                throw IllegalStateException(
+                    "Downloader-Aktualisierung fehlgeschlagen: " +
+                        (e.message ?: "Netzwerkfehler"),
+                    e
+                )
+            }
+        }
+    }
+
+    private fun compactDownloadError(error: Exception): String {
+        val message = error.message.orEmpty()
+        val lines = message.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .toList()
+        val relevant = lines.lastOrNull { it.startsWith("ERROR:", ignoreCase = true) }
+            ?: lines.lastOrNull { it.contains("challenge", ignoreCase = true) }
+            ?: lines.lastOrNull()
+            ?: "Unbekannter Fehler"
+        return relevant.take(420)
     }
 
     fun startSpotifyImport(clientId: String) {
