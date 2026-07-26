@@ -1,8 +1,11 @@
 package de.kochify.music
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
@@ -111,9 +114,13 @@ private val DarkSurface = Color(0xFF181818)
 
 class MainActivity : ComponentActivity() {
     private val musicViewModel by viewModels<MusicViewModel>()
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestPlaybackNotificationPermission()
         musicViewModel.handleSpotifyCallback(intent?.data)
         setContent {
             KochifyTheme(musicViewModel.themeMode) {
@@ -126,6 +133,20 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         musicViewModel.handleSpotifyCallback(intent.data)
+    }
+
+    private fun requestPlaybackNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val prefs = getSharedPreferences("kochify_permissions", MODE_PRIVATE)
+        if (!prefs.getBoolean("notification_permission_asked", false)) {
+            prefs.edit().putBoolean("notification_permission_asked", true).apply()
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 }
 
