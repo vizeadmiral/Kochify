@@ -59,6 +59,12 @@ data class SpotifyPlaylistImport(
     val tracks: List<PendingSpotifyTrack>
 )
 
+enum class KochifyThemeMode {
+    BLACK,
+    LIGHT,
+    RGB
+}
+
 private data class YoutubeDownloadItem(
     val id: String,
     val title: String,
@@ -109,6 +115,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     var isPlaying by mutableStateOf(false)
     var shuffleEnabled by mutableStateOf(prefs.getBoolean("shuffle_enabled", false))
     var repeatOneEnabled by mutableStateOf(prefs.getBoolean("repeat_one_enabled", false))
+    var themeMode by mutableStateOf(
+        runCatching {
+            KochifyThemeMode.valueOf(
+                prefs.getString("theme_mode", KochifyThemeMode.BLACK.name).orEmpty()
+            )
+        }.getOrDefault(KochifyThemeMode.BLACK)
+    )
+        private set
     var downloadProgress by mutableFloatStateOf(0f)
     var downloadStatus by mutableStateOf<String?>(null)
     var isDownloading by mutableStateOf(false)
@@ -853,6 +867,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         player.repeatMode =
             if (repeatOneEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         prefs.edit().putBoolean("repeat_one_enabled", repeatOneEnabled).apply()
+    }
+
+    fun setThemeMode(mode: KochifyThemeMode) {
+        themeMode = mode
+        prefs.edit().putString("theme_mode", mode.name).apply()
     }
 
     fun next() {
