@@ -59,6 +59,19 @@ data class SpotifyPlaylistImport(
     val tracks: List<PendingSpotifyTrack>
 )
 
+private data class YoutubeDownloadItem(
+    val id: String,
+    val title: String,
+    val url: String
+)
+
+private data class YoutubeDownloadPlan(
+    val title: String,
+    val items: List<YoutubeDownloadItem>,
+    val isPlaylist: Boolean,
+    val unavailableItems: Int
+)
+
 private const val SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 private const val SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 private const val SPOTIFY_API_URL = "https://api.spotify.com/v1"
@@ -163,6 +176,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadFromYoutube(url: String) {
         if (url.isBlank() || isDownloading) return
+        val cleanUrl = url.trim()
+        if (!isYoutubeUrl(cleanUrl)) {
+            downloadStatus = "Bitte einen gültigen YouTube- oder YouTube-Music-Link eingeben."
+            return
+        }
         isDownloading = true
         downloadProgress = 0f
         downloadStatus = "Download wird vorbereitet …"
@@ -174,38 +192,102 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 ensureDownloaderReady()
                 updateDownloaderIfNeeded()
-                val before = downloadDir.listFiles()?.map { it.absolutePath }?.toSet().orEmpty()
-                val request = YoutubeDLRequest(url.trim()).apply {
-                    addOption("--extract-audio")
-                    addOption("--audio-format", "mp3")
-                    addOption("--audio-quality", "0")
-                    addOption("--embed-metadata")
-                    addOption("--embed-thumbnail")
-                    addOption("--yes-playlist")
-                    addOption("--no-overwrites")
-                    addOption("--remote-components", "ejs:github")
-                    addOption(
-                        "-o",
-                        File(downloadDir, "%(playlist_title,channel)s/%(title)s [%(id)s].%(ext)s").absolutePath
-                    )
+                withContext(Dispatchers.Main) {
+                    downloadStatus = "YouTube-Link wird analysiert …"
                 }
-                YoutubeDL.getInstance().execute(request) { progress, eta, _ ->
-                    viewModelScope.launch(Dispatchers.Main) {
-                        downloadProgress = (progress / 100f).coerceIn(0f, 1f)
-                        downloadStatus =
-                            "Wird heruntergeladen: ${progress.toInt()} % · noch etwa ${eta}s"
+                val plan = createYoutubeDownloadPlan(cleanUrl)
+                val playlistName = plan.title.takeIf { plan.isPlaylist }
+                val targetDir = File(
+                    downloadDir,
+                    safeFileName(playlistName ?: "Einzelne Downloads")
+                ).apply { mkdirs() }
+
+                if (playlistName != null) {
+                    withContext(Dispatchers.Main) {
+                        if (playlistName !in playlists) {
+                            playlists.add(playlistName)
+                            save()
+                        }
+                        downloadStatus = buildString {
+                            append("„$playlistName“: ${plan.items.size} Titel gefunden.")
+                            if (plan.unavailableItems > 0) {
+                                append(" ${plan.unavailableItems} nicht verfügbar.")
+                            }
+                        }
                     }
                 }
-                val files = downloadDir.walkTopDown()
-                    .filter { it.isFile && it.extension.equals("mp3", true) }
-                    .filter { it.absolutePath !in before }
-                    .toList()
-                files.forEach(::addFile)
+
+                var completed = 0
+                var reused = 0
+                val failures = mutableListOf<String>()
+                plan.items.forEachIndexed { index, item ->
+                    val itemNumber = index + 1
+                    val before = mp3Files(targetDir).associateBy { it.absolutePath }
+                    withContext(Dispatchers.Main) {
+                        downloadProgress = index.toFloat() / plan.items.size
+                        downloadStatus = if (plan.isPlaylist) {
+                            "Titel $itemNumber von ${plan.items.size}: ${item.title}"
+                        } else {
+                            "Wird heruntergeladen: ${item.title}"
+                        }
+                    }
+
+                    try {
+                        val request = YoutubeDLRequest(item.url).apply {
+                            addOption("--extract-audio")
+                            addOption("--audio-format", "mp3")
+                            addOption("--audio-quality", "0")
+                            addOption("--embed-metadata")
+                            addOption("--embed-thumbnail")
+                            addOption("--no-playlist")
+                            addOption("--no-overwrites")
+                            addOption("--remote-components", "ejs:github")
+                            addOption(
+                                "-o",
+                                File(targetDir, "%(title)s [%(id)s].%(ext)s").absolutePath
+                            )
+                        }
+                        YoutubeDL.getInstance().execute(request) { progress, eta, _ ->
+                            viewModelScope.launch(Dispatchers.Main) {
+                                val itemProgress = (progress / 100f).coerceIn(0f, 1f)
+                                downloadProgress =
+                                    ((index + itemProgress) / plan.items.size).coerceIn(0f, 1f)
+                                val etaText = if (eta > 0) " · noch etwa ${eta}s" else ""
+                                downloadStatus = if (plan.isPlaylist) {
+                                    "Titel $itemNumber von ${plan.items.size}: " +
+                                        "${progress.toInt()} %$etaText\n${item.title}"
+                                } else {
+                                    "Wird heruntergeladen: ${progress.toInt()} %$etaText"
+                                }
+                            }
+                        }
+
+                        val after = mp3Files(targetDir)
+                        val newFiles = after.filter { it.absolutePath !in before }
+                        val itemFiles = if (newFiles.isNotEmpty()) {
+                            newFiles
+                        } else {
+                            findExistingDownload(after, item)
+                        }
+                        if (itemFiles.isEmpty()) {
+                            failures += item.title
+                        } else {
+                            itemFiles.forEach { addFile(it, playlistName) }
+                            if (newFiles.isEmpty()) reused++ else completed++
+                        }
+                    } catch (_: Exception) {
+                        failures += item.title
+                    }
+                }
+
                 withContext(Dispatchers.Main) {
                     downloadProgress = 1f
-                    downloadStatus =
-                        if (files.isEmpty()) "Keine neue MP3 gefunden oder bereits vorhanden."
-                        else "${files.size} MP3-Datei(en) fertig."
+                    downloadStatus = buildDownloadSummary(
+                        plan = plan,
+                        completed = completed,
+                        reused = reused,
+                        failures = failures
+                    )
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -214,6 +296,155 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 withContext(Dispatchers.Main) { isDownloading = false }
             }
+        }
+    }
+
+    private fun createYoutubeDownloadPlan(url: String): YoutubeDownloadPlan {
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--flat-playlist")
+            addOption("--dump-single-json")
+            addOption("--ignore-errors")
+            addOption("--no-warnings")
+            addOption("--remote-components", "ejs:github")
+        }
+        val response = YoutubeDL.getInstance().execute(request)
+        val jsonText = response.out.trim()
+        val jsonStart = jsonText.indexOf('{')
+        val jsonEnd = jsonText.lastIndexOf('}')
+        if (jsonStart < 0 || jsonEnd <= jsonStart) {
+            throw IllegalStateException("Die YouTube-Informationen konnten nicht gelesen werden.")
+        }
+        val root = JSONObject(jsonText.substring(jsonStart, jsonEnd + 1))
+        val entries = root.optJSONArray("entries")
+        val isPlaylist = entries != null || root.optString("_type") == "playlist"
+
+        if (!isPlaylist) {
+            return YoutubeDownloadPlan(
+                title = cleanDisplayName(root.optString("title"), "YouTube-Download"),
+                items = listOf(
+                    YoutubeDownloadItem(
+                        id = root.optString("id"),
+                        title = cleanDisplayName(root.optString("title"), "YouTube-Titel"),
+                        url = url
+                    )
+                ),
+                isPlaylist = false,
+                unavailableItems = 0
+            )
+        }
+
+        val items = mutableListOf<YoutubeDownloadItem>()
+        var unavailable = 0
+        val playlistEntries = entries ?: JSONArray()
+        repeat(playlistEntries.length()) { index ->
+            val entry = playlistEntries.optJSONObject(index)
+            if (entry == null) {
+                unavailable++
+                return@repeat
+            }
+            val itemUrl = youtubeEntryUrl(entry)
+            if (itemUrl == null) {
+                unavailable++
+                return@repeat
+            }
+            items += YoutubeDownloadItem(
+                id = entry.optString("id"),
+                title = cleanDisplayName(
+                    entry.optString("title").ifBlank { entry.optString("fulltitle") },
+                    "Titel ${index + 1}"
+                ),
+                url = itemUrl
+            )
+        }
+        if (items.isEmpty()) {
+            throw IllegalStateException(
+                "Die Playlist enthält keine verfügbaren Videos oder ist nicht zugänglich."
+            )
+        }
+        return YoutubeDownloadPlan(
+            title = cleanDisplayName(
+                root.optString("title").ifBlank { root.optString("playlist_title") },
+                "YouTube-Playlist"
+            ),
+            items = items,
+            isPlaylist = true,
+            unavailableItems = unavailable
+        )
+    }
+
+    private fun youtubeEntryUrl(entry: JSONObject): String? {
+        val candidates = listOf(
+            entry.optString("webpage_url"),
+            entry.optString("original_url"),
+            entry.optString("url")
+        )
+        candidates.firstOrNull { it.startsWith("https://") || it.startsWith("http://") }
+            ?.let { return it }
+        val id = entry.optString("id").ifBlank {
+            candidates.firstOrNull { it.isNotBlank() }.orEmpty()
+        }
+        return id.takeIf { it.matches(Regex("[A-Za-z0-9_-]{6,20}")) }
+            ?.let { "https://www.youtube.com/watch?v=$it" }
+    }
+
+    private fun isYoutubeUrl(value: String): Boolean {
+        val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return false
+        if (uri.scheme !in setOf("http", "https")) return false
+        val host = uri.host?.lowercase().orEmpty()
+        return host == "youtu.be" ||
+            host == "youtube.com" ||
+            host.endsWith(".youtube.com") ||
+            host == "youtube-nocookie.com" ||
+            host.endsWith(".youtube-nocookie.com")
+    }
+
+    private fun cleanDisplayName(value: String, fallback: String): String = value
+        .replace(Regex("[\\r\\n]+"), " ")
+        .trim()
+        .take(100)
+        .ifBlank { fallback }
+
+    private fun safeFileName(value: String): String = value
+        .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .trimEnd('.')
+        .take(80)
+        .ifBlank { "YouTube-Playlist" }
+
+    private fun mp3Files(directory: File): List<File> = directory.walkTopDown()
+        .filter { it.isFile && it.extension.equals("mp3", true) }
+        .toList()
+
+    private fun findExistingDownload(
+        files: List<File>,
+        item: YoutubeDownloadItem
+    ): List<File> {
+        if (item.id.isBlank()) return emptyList()
+        val suffix = "[${item.id}]"
+        return files.filter { it.nameWithoutExtension.endsWith(suffix) }
+    }
+
+    private fun buildDownloadSummary(
+        plan: YoutubeDownloadPlan,
+        completed: Int,
+        reused: Int,
+        failures: List<String>
+    ): String = buildString {
+        if (plan.isPlaylist) {
+            append("Playlist „${plan.title}“ fertig: ")
+        }
+        append("$completed neu")
+        if (reused > 0) append(", $reused bereits vorhanden")
+        if (plan.unavailableItems > 0) {
+            append(", ${plan.unavailableItems} nicht verfügbar")
+        }
+        if (failures.isNotEmpty()) {
+            append(", ${failures.size} fehlgeschlagen")
+            append(". Erneut versuchen: ${failures.take(3).joinToString()}")
+            if (failures.size > 3) append(" …")
+        } else {
+            append(".")
         }
     }
 
@@ -700,17 +931,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun addFile(file: File) {
+    private suspend fun addFile(file: File, playlistName: String? = null) {
         if (!file.exists()) return
         val metadata = metadata(file)
         val track = AudioTrack(
             id = UUID.randomUUID().toString(),
             title = metadata.first.ifBlank { file.nameWithoutExtension },
             artist = metadata.second.ifBlank { "Unbekannter Interpret" },
-            path = file.absolutePath
+            path = file.absolutePath,
+            playlists = playlistName?.let(::setOf).orEmpty()
         )
-        viewModelScope.launch(Dispatchers.Main) {
-            if (tracks.none { it.path == file.absolutePath }) {
+        withContext(Dispatchers.Main) {
+            val existingIndex = tracks.indexOfFirst { it.path == file.absolutePath }
+            if (existingIndex < 0) {
                 val assignments = pendingSpotifyTracks.filter {
                     spotifyMatches(track.title, track.artist, it.title, it.artist)
                 }
@@ -719,6 +952,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 pendingSpotifyTracks.removeAll(assignments.toSet())
                 tracks.add(assignedTrack)
+                save()
+            } else if (playlistName != null &&
+                playlistName !in tracks[existingIndex].playlists
+            ) {
+                tracks[existingIndex] = tracks[existingIndex].copy(
+                    playlists = tracks[existingIndex].playlists + playlistName
+                )
                 save()
             }
         }
@@ -744,7 +984,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             downloadDir.walkTopDown()
                 .filter { it.isFile && it.extension.equals("mp3", true) }
-                .forEach(::addFile)
+                .forEach { addFile(it) }
         }
     }
 
