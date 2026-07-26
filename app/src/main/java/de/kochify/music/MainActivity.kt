@@ -557,13 +557,22 @@ private fun DownloadDialog(
 ) {
     var url by remember { mutableStateOf("") }
     var confirmed by remember { mutableStateOf(false) }
+    val looksLikePlaylist = url.contains("list=", ignoreCase = true) ||
+        url.contains("/playlist", ignoreCase = true)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Link oder Playlist herunterladen") },
+        title = { Text("YouTube als MP3 herunterladen") },
         text = {
             Column {
                 Text(
-                    "Nur für eigene Inhalte oder Medien verwenden, für deren Download und Umwandlung du die ausdrückliche Erlaubnis besitzt.",
+                    "Einzelne Videos oder vollständige Playlists. Kochify erstellt für eine " +
+                        "YouTube-Playlist automatisch eine gleichnamige Playlist.",
+                    color = Color.LightGray
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Nur für eigene Inhalte oder Medien verwenden, für deren Download und " +
+                        "Umwandlung du die ausdrückliche Erlaubnis besitzt.",
                     color = Color.LightGray
                 )
                 Spacer(Modifier.height(12.dp))
@@ -589,6 +598,11 @@ private fun DownloadDialog(
                             .fillMaxWidth()
                             .padding(vertical = 8.dp)
                     )
+                    Text(
+                        "Gesamtfortschritt: ${(progress * 100).toInt()} %",
+                        color = Color.LightGray,
+                        fontSize = 12.sp
+                    )
                 }
                 status?.let {
                     Text(it, color = Color.LightGray, fontSize = 13.sp)
@@ -606,7 +620,13 @@ private fun DownloadDialog(
                         strokeWidth = 2.dp
                     )
                 } else {
-                    Text("Als MP3 laden")
+                    Text(
+                        if (looksLikePlaylist) {
+                            "Playlist vollständig laden"
+                        } else {
+                            "Als MP3 laden"
+                        }
+                    )
                 }
             }
         },
