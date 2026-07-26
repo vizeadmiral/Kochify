@@ -8,6 +8,7 @@ import android.os.Environment
 import android.util.Base64
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -21,6 +22,8 @@ import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -113,6 +116,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     var selectedPlaylist by mutableStateOf<String?>(null)
     var currentTrack by mutableStateOf<AudioTrack?>(null)
     var isPlaying by mutableStateOf(false)
+    var playbackPositionMs by mutableLongStateOf(0L)
+        private set
+    var playbackDurationMs by mutableLongStateOf(0L)
+        private set
     var shuffleEnabled by mutableStateOf(prefs.getBoolean("shuffle_enabled", false))
     var repeatOneEnabled by mutableStateOf(prefs.getBoolean("repeat_one_enabled", false))
     var themeMode by mutableStateOf(
@@ -142,11 +149,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
+                playbackDurationMs = player.duration.takeIf { it > 0L } ?: 0L
                 if (playbackState == Player.STATE_ENDED && !repeatOneEnabled) {
                     next()
                 }
             }
         })
+        viewModelScope.launch {
+            while (isActive) {
+                playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
+                playbackDurationMs = player.duration.takeIf { it > 0L } ?: 0L
+                delay(500L)
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 ensureDownloaderReady()
@@ -848,6 +864,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun play(track: AudioTrack) {
         currentTrack = track
+        playbackPositionMs = 0L
+        playbackDurationMs = 0L
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(track.path))))
         player.prepare()
         player.play()
@@ -855,6 +873,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayback() {
         if (player.isPlaying) player.pause() else player.play()
+    }
+
+    fun seekTo(positionMs: Long) {
+        val target = if (playbackDurationMs > 0L) {
+            positionMs.coerceIn(0L, playbackDurationMs)
+        } else {
+            positionMs.coerceAtLeast(0L)
+        }
+        player.seekTo(target)
+        playbackPositionMs = target
     }
 
     fun toggleShuffle() {
@@ -888,6 +916,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun previous() {
         val current = currentTrack ?: return
+        if (player.currentPosition > 5_000L) {
+            seekTo(0L)
+            return
+        }
         val index = tracks.indexOfFirst { it.id == current.id }
         if (tracks.isNotEmpty()) play(tracks[(index - 1).mod(tracks.size)])
     }
