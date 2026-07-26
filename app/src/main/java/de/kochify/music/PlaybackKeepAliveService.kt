@@ -85,10 +85,7 @@ class PlaybackKeepAliveService : Service() {
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, PlaybackKeepAliveService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            context.stopService(Intent(context, PlaybackKeepAliveService::class.java))
         }
     }
 }
