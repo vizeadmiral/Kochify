@@ -62,6 +62,7 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -216,6 +217,8 @@ private fun MusicApp(vm: MusicViewModel) {
     var showDownload by remember { mutableStateOf(false) }
     var showSpotifyImport by remember { mutableStateOf(false) }
     var showThemePicker by remember { mutableStateOf(false) }
+    var showBackup by remember { mutableStateOf(false) }
+    var backupIncludesMusic by remember { mutableStateOf(true) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var showNowPlaying by remember { mutableStateOf(false) }
     var editingTrack by remember { mutableStateOf<AudioTrack?>(null) }
@@ -224,6 +227,16 @@ private fun MusicApp(vm: MusicViewModel) {
     val audioPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents()
     ) { uris -> vm.importAudio(uris) }
+    val backupExporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        uri?.let { vm.exportKochifyBackup(it, backupIncludesMusic) }
+    }
+    val backupImporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let(vm::importKochifyBackup)
+    }
 
     val activeTrack = vm.currentTrack
     BackHandler(enabled = showNowPlaying && activeTrack != null) {
@@ -284,6 +297,12 @@ private fun MusicApp(vm: MusicViewModel) {
                             onClick = { showThemePicker = true },
                             icon = { Icon(Icons.Default.Palette, null) },
                             label = { Text("Design") }
+                        )
+                        NavigationBarItem(
+                            selected = false,
+                            onClick = { showBackup = true },
+                            icon = { Icon(Icons.Default.SettingsBackupRestore, null) },
+                            label = { Text("Sicherung") }
                         )
                     }
                 }
@@ -350,6 +369,31 @@ private fun MusicApp(vm: MusicViewModel) {
             selected = vm.themeMode,
             onSelect = vm::selectThemeMode,
             onDismiss = { showThemePicker = false }
+        )
+    }
+    if (showBackup) {
+        BackupDialog(
+            busy = vm.isBackupBusy,
+            status = vm.backupStatus,
+            onExportComplete = {
+                backupIncludesMusic = true
+                backupExporter.launch("Kochify-Komplettsicherung.kochify")
+            },
+            onExportQuick = {
+                backupIncludesMusic = false
+                backupExporter.launch("Kochify-Sicherung.kochify")
+            },
+            onImport = {
+                backupImporter.launch(
+                    arrayOf(
+                        "application/zip",
+                        "application/octet-stream",
+                        "application/x-zip-compressed",
+                        "*/*"
+                    )
+                )
+            },
+            onDismiss = { if (!vm.isBackupBusy) showBackup = false }
         )
     }
     if (showNewPlaylist) {
@@ -1054,6 +1098,76 @@ private fun formatPlaybackTime(milliseconds: Long): String {
     } else {
         "%d:%02d".format(minutes, seconds)
     }
+}
+
+@Composable
+private fun BackupDialog(
+    busy: Boolean,
+    status: String?,
+    onExportComplete: () -> Unit,
+    onExportQuick: () -> Unit,
+    onImport: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sicherung & Wiederherstellung") },
+        text = {
+            Column {
+                Text(
+                    "Speichere deine Playlists, Favoriten, Cover und Einstellungen direkt " +
+                        "auf dem Handy. Die Komplettsicherung enthält zusätzlich alle " +
+                        "Musikdateien."
+                )
+                Spacer(Modifier.height(16.dp))
+                Button(
+                    onClick = onExportComplete,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Komplettsicherung exportieren")
+                }
+                TextButton(
+                    onClick = onExportQuick,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Schnellsicherung ohne Musik")
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant
+                )
+                Button(
+                    onClick = onImport,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Kochify-Sicherung importieren")
+                }
+                if (busy) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 14.dp)
+                    )
+                }
+                status?.let {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) {
+                Text("Schließen")
+            }
+        }
+    )
 }
 
 @Composable
