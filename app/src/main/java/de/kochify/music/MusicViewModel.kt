@@ -869,7 +869,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putBoolean("repeat_one_enabled", repeatOneEnabled).apply()
     }
 
-    fun setThemeMode(mode: KochifyThemeMode) {
+    fun selectThemeMode(mode: KochifyThemeMode) {
         themeMode = mode
         prefs.edit().putString("theme_mode", mode.name).apply()
     }
