@@ -15,6 +15,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -110,7 +112,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val playlists = mutableStateListOf<String>()
     private val pendingSpotifyTracks = mutableStateListOf<PendingSpotifyTrack>()
     private val spotifyPlaylistLinks = mutableStateMapOf<String, String>()
-    val player = ExoPlayer.Builder(app).build()
+    val player = ExoPlayer.Builder(app).build().apply {
+        setAudioAttributes(
+            AudioAttributes.Builder()
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .setUsage(C.USAGE_MEDIA)
+                .build(),
+            true
+        )
+        setWakeMode(C.WAKE_MODE_LOCAL)
+    }
 
     var search by mutableStateOf("")
     var selectedPlaylist by mutableStateOf<String?>(null)
@@ -869,10 +880,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(track.path))))
         player.prepare()
         player.play()
+        PlaybackKeepAliveService.start(app, track.title, track.artist)
     }
 
     fun togglePlayback() {
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            player.play()
+            currentTrack?.let {
+                PlaybackKeepAliveService.start(app, it.title, it.artist)
+            }
+        }
     }
 
     fun seekTo(positionMs: Long) {
@@ -980,6 +999,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteTrack(track: AudioTrack) {
         if (currentTrack?.id == track.id) {
             player.stop()
+            PlaybackKeepAliveService.stop(app)
             currentTrack = null
         }
         tracks.removeAll { it.id == track.id }
@@ -1069,7 +1089,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (index >= 0) {
             val updated = transform(tracks[index])
             tracks[index] = updated
-            if (currentTrack?.id == id) currentTrack = updated
+            if (currentTrack?.id == id) {
+                currentTrack = updated
+                if (player.isPlaying) {
+                    PlaybackKeepAliveService.start(app, updated.title, updated.artist)
+                }
+            }
             save()
         }
     }
@@ -1161,6 +1186,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         player.release()
+        PlaybackKeepAliveService.stop(app)
         super.onCleared()
     }
 }
