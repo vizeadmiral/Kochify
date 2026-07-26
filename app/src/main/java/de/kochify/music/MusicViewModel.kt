@@ -146,6 +146,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     var isDownloading by mutableStateOf(false)
     var spotifyStatus by mutableStateOf<String?>(null)
     var isSpotifyImporting by mutableStateOf(false)
+    var backupStatus by mutableStateOf<String?>(null)
+    var isBackupBusy by mutableStateOf(false)
     val spotifyClientId: String
         get() = prefs.getString("spotify_client_id", "").orEmpty()
 
@@ -181,6 +183,139 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.Main) {
                     downloadStatus = "Download-Modul konnte nicht gestartet werden: ${e.message}"
                 }
+            }
+        }
+    }
+
+    fun exportKochifyBackup(uri: Uri, includeMusic: Boolean) {
+        if (isBackupBusy) return
+        val trackSnapshot = tracks.toList()
+        val playlistSnapshot = playlists.toList()
+        val themeSnapshot = themeMode
+        val shuffleSnapshot = shuffleEnabled
+        val repeatSnapshot = repeatOneEnabled
+        isBackupBusy = true
+        backupStatus = if (includeMusic) {
+            "Komplettsicherung wird erstellt …"
+        } else {
+            "Schnellsicherung wird erstellt …"
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val audioFiles = KochifyBackupManager.export(
+                    context = app,
+                    uri = uri,
+                    tracks = trackSnapshot,
+                    playlists = playlistSnapshot,
+                    themeMode = themeSnapshot,
+                    shuffleEnabled = shuffleSnapshot,
+                    repeatOneEnabled = repeatSnapshot,
+                    includeMusic = includeMusic
+                )
+                withContext(Dispatchers.Main) {
+                    backupStatus = if (includeMusic) {
+                        "Sicherung gespeichert: ${playlistSnapshot.size} Playlists und " +
+                            "$audioFiles Musikdateien."
+                    } else {
+                        "Sicherung gespeichert: ${playlistSnapshot.size} Playlists. " +
+                            "Musikdateien wurden nicht mitgesichert."
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    backupStatus = "Export fehlgeschlagen: " +
+                        (e.message ?: "Unbekannter Fehler").take(240)
+                }
+            } finally {
+                withContext(Dispatchers.Main) { isBackupBusy = false }
+            }
+        }
+    }
+
+    fun importKochifyBackup(uri: Uri) {
+        if (isBackupBusy) return
+        isBackupBusy = true
+        backupStatus = "Kochify-Sicherung wird importiert …"
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val imported = KochifyBackupManager.import(app, uri)
+                withContext(Dispatchers.Main) {
+                    imported.playlists.forEach { playlist ->
+                        if (playlist !in playlists) playlists.add(playlist)
+                    }
+                    var restoredTracks = 0
+                    var matchedTracks = 0
+                    var missingTracks = 0
+                    imported.tracks.forEach { backupTrack ->
+                        val existingIndex = tracks.indexOfFirst {
+                            spotifyMatches(
+                                it.title,
+                                it.artist,
+                                backupTrack.title,
+                                backupTrack.artist
+                            )
+                        }
+                        if (existingIndex >= 0) {
+                            val existing = tracks[existingIndex]
+                            val updated = existing.copy(
+                                favorite = existing.favorite || backupTrack.favorite,
+                                playlists = existing.playlists + backupTrack.playlists,
+                                coverPath = backupTrack.coverPath ?: existing.coverPath
+                            )
+                            tracks[existingIndex] = updated
+                            if (currentTrack?.id == updated.id) currentTrack = updated
+                            backupTrack.audioPath?.let { File(it).delete() }
+                            matchedTracks++
+                        } else if (backupTrack.audioPath != null) {
+                            tracks.add(
+                                AudioTrack(
+                                    id = UUID.randomUUID().toString(),
+                                    title = backupTrack.title,
+                                    artist = backupTrack.artist,
+                                    path = backupTrack.audioPath,
+                                    coverPath = backupTrack.coverPath,
+                                    favorite = backupTrack.favorite,
+                                    playlists = backupTrack.playlists
+                                )
+                            )
+                            restoredTracks++
+                        } else {
+                            backupTrack.coverPath?.let { File(it).delete() }
+                            missingTracks++
+                        }
+                    }
+
+                    themeMode = imported.themeMode
+                    shuffleEnabled = imported.shuffleEnabled
+                    repeatOneEnabled = imported.repeatOneEnabled
+                    player.repeatMode = if (repeatOneEnabled) {
+                        Player.REPEAT_MODE_ONE
+                    } else {
+                        Player.REPEAT_MODE_OFF
+                    }
+                    prefs.edit()
+                        .putString("theme_mode", themeMode.name)
+                        .putBoolean("shuffle_enabled", shuffleEnabled)
+                        .putBoolean("repeat_one_enabled", repeatOneEnabled)
+                        .apply()
+                    save()
+                    backupStatus = buildString {
+                        append("Import abgeschlossen: ${imported.playlists.size} Playlists")
+                        if (restoredTracks > 0) append(", $restoredTracks Songs wiederhergestellt")
+                        if (matchedTracks > 0) append(", $matchedTracks vorhandene Songs zugeordnet")
+                        if (missingTracks > 0) {
+                            append(", $missingTracks Songs ohne Audiodatei übersprungen")
+                        }
+                        append(".")
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    backupStatus = "Import fehlgeschlagen: " +
+                        (e.message ?: "Unbekannter Fehler").take(240)
+                }
+            } finally {
+                withContext(Dispatchers.Main) { isBackupBusy = false }
             }
         }
     }
