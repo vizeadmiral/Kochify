@@ -9,6 +9,7 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - Suche, Favoriten und eigene Playlists
 - Shuffle, automatische Weiterschaltung und Endloswiederholung einzelner Titel
 - auswählbare Designs: Schwarz, Hell und animierte RGB-Farben
+- Vollbild-Player mit großem Cover, Zeitleiste, Shuffle, Endloswiederholung und Songoptionen
 - bearbeitbaren Titeln, Interpreten und Covern
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
