@@ -9,6 +9,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -43,6 +48,7 @@ import androidx.compose.material.icons.filled.NavigateBefore
 import androidx.compose.material.icons.filled.NavigateNext
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
@@ -65,10 +71,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -79,15 +87,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val SpotifyGreen = Color(0xFF1ED760)
-private val AppBackground = Color(0xFF0A0A0A)
-private val CardBackground = Color(0xFF181818)
+private val KochifyGreen = Color(0xFF1ED760)
+private val DarkBackground = Color(0xFF0A0A0A)
+private val DarkSurface = Color(0xFF181818)
 
 class MainActivity : ComponentActivity() {
     private val musicViewModel by viewModels<MusicViewModel>()
@@ -96,13 +105,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         musicViewModel.handleSpotifyCallback(intent?.data)
         setContent {
-            MaterialTheme(
-                colorScheme = darkColorScheme(
-                    primary = SpotifyGreen,
-                    background = AppBackground,
-                    surface = CardBackground
-                )
-            ) {
+            KochifyTheme(musicViewModel.themeMode) {
                 MusicApp(musicViewModel)
             }
         }
@@ -115,12 +118,72 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Composable
+private fun KochifyTheme(
+    mode: KochifyThemeMode,
+    content: @Composable () -> Unit
+) {
+    val rgbAccent = if (mode == KochifyThemeMode.RGB) {
+        val rgbTransition = rememberInfiniteTransition(label = "RGB-Farben")
+        val hue by rgbTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(
+                    durationMillis = 10_000,
+                    easing = LinearEasing
+                )
+            ),
+            label = "RGB-Akzent"
+        )
+        Color.hsv(hue, saturation = 0.78f, value = 1f)
+    } else {
+        KochifyGreen
+    }
+    val colorScheme = when (mode) {
+        KochifyThemeMode.BLACK -> darkColorScheme(
+            primary = KochifyGreen,
+            onPrimary = Color.Black,
+            background = DarkBackground,
+            onBackground = Color.White,
+            surface = DarkSurface,
+            onSurface = Color.White,
+            surfaceVariant = Color(0xFF252525),
+            onSurfaceVariant = Color(0xFFCCCCCC)
+        )
+        KochifyThemeMode.LIGHT -> lightColorScheme(
+            primary = Color(0xFF087D3E),
+            onPrimary = Color.White,
+            background = Color(0xFFF4F5F7),
+            onBackground = Color(0xFF151515),
+            surface = Color.White,
+            onSurface = Color(0xFF151515),
+            surfaceVariant = Color(0xFFE5E8EB),
+            onSurfaceVariant = Color(0xFF50545A)
+        )
+        KochifyThemeMode.RGB -> darkColorScheme(
+            primary = rgbAccent,
+            onPrimary = if (rgbAccent.luminance() > 0.42f) Color.Black else Color.White,
+            secondary = Color(0xFFE040FB),
+            tertiary = Color(0xFFFFEA00),
+            background = Color(0xFF090912),
+            onBackground = Color.White,
+            surface = Color(0xFF151525),
+            onSurface = Color.White,
+            surfaceVariant = Color(0xFF24243B),
+            onSurfaceVariant = Color(0xFFD6D2E4)
+        )
+    }
+    MaterialTheme(colorScheme = colorScheme, content = content)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MusicApp(vm: MusicViewModel) {
     var mode by remember { mutableStateOf(LibraryMode.ALL) }
     var showDownload by remember { mutableStateOf(false) }
     var showSpotifyImport by remember { mutableStateOf(false) }
+    var showThemePicker by remember { mutableStateOf(false) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var editingTrack by remember { mutableStateOf<AudioTrack?>(null) }
     var playlistTrack by remember { mutableStateOf<AudioTrack?>(null) }
@@ -130,11 +193,11 @@ private fun MusicApp(vm: MusicViewModel) {
     ) { uris -> vm.importAudio(uris) }
 
     Scaffold(
-        containerColor = AppBackground,
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             Column {
                 vm.currentTrack?.let { MiniPlayer(vm, it) }
-                NavigationBar(containerColor = Color(0xFF111111)) {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     NavigationBarItem(
                         selected = mode == LibraryMode.ALL,
                         onClick = { mode = LibraryMode.ALL },
@@ -156,6 +219,12 @@ private fun MusicApp(vm: MusicViewModel) {
                         icon = { Icon(Icons.Default.QueueMusic, null) },
                         label = { Text("Playlists") }
                     )
+                    NavigationBarItem(
+                        selected = false,
+                        onClick = { showThemePicker = true },
+                        icon = { Icon(Icons.Default.Palette, null) },
+                        label = { Text("Design") }
+                    )
                 }
             }
         }
@@ -164,7 +233,7 @@ private fun MusicApp(vm: MusicViewModel) {
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
-                .background(AppBackground)
+                .background(MaterialTheme.colorScheme.background)
         ) {
             Header(
                 mode = mode,
@@ -212,6 +281,13 @@ private fun MusicApp(vm: MusicViewModel) {
             status = vm.spotifyStatus,
             onDismiss = { if (!vm.isSpotifyImporting) showSpotifyImport = false },
             onConnect = vm::startSpotifyImport
+        )
+    }
+    if (showThemePicker) {
+        ThemePickerDialog(
+            selected = vm.themeMode,
+            onSelect = vm::setThemeMode,
+            onDismiss = { showThemePicker = false }
         )
     }
     if (showNewPlaylist) {
@@ -279,7 +355,7 @@ private fun Header(
                 Text(
                     text = "Version ${BuildConfig.VERSION_NAME}",
                     fontSize = 10.sp,
-                    color = Color.Gray
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -287,10 +363,18 @@ private fun Header(
             Icon(Icons.Default.Add, "MP3 importieren")
         }
         IconButton(onClick = onDownload) {
-            Icon(Icons.Default.Download, "Link herunterladen", tint = SpotifyGreen)
+            Icon(
+                Icons.Default.Download,
+                "Link herunterladen",
+                tint = MaterialTheme.colorScheme.primary
+            )
         }
         IconButton(onClick = onSpotifyImport) {
-            Icon(Icons.Default.Sync, "Spotify-Playlists importieren", tint = SpotifyGreen)
+            Icon(
+                Icons.Default.Sync,
+                "Spotify-Playlists importieren",
+                tint = MaterialTheme.colorScheme.primary
+            )
         }
         IconButton(onClick = onNewPlaylist) {
             Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
@@ -323,9 +407,17 @@ private fun TrackList(
     if (tracks.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.MusicNote, null, modifier = Modifier.size(52.dp), tint = Color.Gray)
+                Icon(
+                    Icons.Default.MusicNote,
+                    null,
+                    modifier = Modifier.size(52.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(Modifier.height(12.dp))
-                Text("Noch keine passenden Titel", color = Color.Gray)
+                Text(
+                    "Noch keine passenden Titel",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
         return
@@ -372,14 +464,18 @@ private fun TrackRow(
                 track.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                color = if (isCurrent) SpotifyGreen else Color.White,
+                color = if (isCurrent) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onBackground
+                },
                 fontWeight = FontWeight.SemiBold
             )
             Text(
                 track.artist,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                color = Color.Gray,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp
             )
         }
@@ -387,7 +483,11 @@ private fun TrackRow(
             Icon(
                 if (track.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                 "Favorit",
-                tint = if (track.favorite) SpotifyGreen else Color.LightGray
+                tint = if (track.favorite) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
             )
         }
         Box {
@@ -432,12 +532,12 @@ private fun PlaylistList(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(CardBackground)
+                    .background(MaterialTheme.colorScheme.surface)
                     .clickable(onClick = onCreate)
                     .padding(18.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Add, null, tint = SpotifyGreen)
+                Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(14.dp))
                 Text("Neue Playlist erstellen", fontWeight = FontWeight.Bold)
             }
@@ -455,10 +555,17 @@ private fun PlaylistList(
                 Box(
                     Modifier
                         .size(58.dp)
-                        .background(Color(0xFF242424), RoundedCornerShape(8.dp)),
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant,
+                            RoundedCornerShape(8.dp)
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.QueueMusic, null, tint = SpotifyGreen)
+                    Icon(
+                        Icons.Default.QueueMusic,
+                        null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                 }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
@@ -466,7 +573,7 @@ private fun PlaylistList(
                     if (spotifyUrl != null) {
                         Text(
                             "Von Spotify importiert",
-                            color = SpotifyGreen,
+                            color = MaterialTheme.colorScheme.primary,
                             fontSize = 12.sp
                         )
                     }
@@ -476,12 +583,12 @@ private fun PlaylistList(
                         Icon(
                             Icons.Default.OpenInNew,
                             "Original in Spotify öffnen",
-                            tint = SpotifyGreen
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
                 }
             }
-            HorizontalDivider(color = Color(0xFF222222))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }
@@ -491,7 +598,7 @@ private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF252525))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -507,7 +614,7 @@ private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
                 Text(
                     track.artist,
                     maxLines = 1,
-                    color = Color.LightGray,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp
                 )
             }
@@ -521,7 +628,11 @@ private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
                 Icon(
                     Icons.Default.Shuffle,
                     if (vm.shuffleEnabled) "Shuffle ausschalten" else "Shuffle einschalten",
-                    tint = if (vm.shuffleEnabled) SpotifyGreen else Color.LightGray
+                    tint = if (vm.shuffleEnabled) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
                 )
             }
             IconButton(onClick = vm::previous) {
@@ -529,12 +640,14 @@ private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
             }
             FilledIconButton(
                 onClick = vm::togglePlayback,
-                colors = IconButtonDefaults.filledIconButtonColors(containerColor = SpotifyGreen)
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                )
             ) {
                 Icon(
                     if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     if (vm.isPlaying) "Pause" else "Abspielen",
-                    tint = Color.Black
+                    tint = MaterialTheme.colorScheme.onPrimary
                 )
             }
             IconButton(onClick = vm::next) {
@@ -548,9 +661,96 @@ private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
                     } else {
                         "Titel endlos wiederholen"
                     },
-                    tint = if (vm.repeatOneEnabled) SpotifyGreen else Color.LightGray
+                    tint = if (vm.repeatOneEnabled) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun ThemePickerDialog(
+    selected: KochifyThemeMode,
+    onSelect: (KochifyThemeMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Design auswählen") },
+        text = {
+            Column {
+                ThemeOption(
+                    mode = KochifyThemeMode.BLACK,
+                    selected = selected == KochifyThemeMode.BLACK,
+                    title = "Schwarz",
+                    description = "Klassischer Kochify Dark Mode",
+                    swatch = KochifyGreen,
+                    onSelect = onSelect
+                )
+                ThemeOption(
+                    mode = KochifyThemeMode.LIGHT,
+                    selected = selected == KochifyThemeMode.LIGHT,
+                    title = "Hell",
+                    description = "Helle Flächen und dunkle Schrift",
+                    swatch = Color(0xFF087D3E),
+                    onSelect = onSelect
+                )
+                ThemeOption(
+                    mode = KochifyThemeMode.RGB,
+                    selected = selected == KochifyThemeMode.RGB,
+                    title = "RGB",
+                    description = "Langsam wechselnde Farbakzente",
+                    swatch = Color(0xFFE040FB),
+                    onSelect = onSelect
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("Fertig")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ThemeOption(
+    mode: KochifyThemeMode,
+    selected: Boolean,
+    title: String,
+    description: String,
+    swatch: Color,
+    onSelect: (KochifyThemeMode) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onSelect(mode) }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = { onSelect(mode) }
+        )
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .background(swatch, CircleShape)
+        )
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(
+                description,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp
+            )
         }
     }
 }
@@ -575,13 +775,13 @@ private fun DownloadDialog(
                 Text(
                     "Einzelne Videos oder vollständige Playlists. Kochify erstellt für eine " +
                         "YouTube-Playlist automatisch eine gleichnamige Playlist.",
-                    color = Color.LightGray
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "Nur für eigene Inhalte oder Medien verwenden, für deren Download und " +
                         "Umwandlung du die ausdrückliche Erlaubnis besitzt.",
-                    color = Color.LightGray
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
@@ -608,12 +808,16 @@ private fun DownloadDialog(
                     )
                     Text(
                         "Gesamtfortschritt: ${(progress * 100).toInt()} %",
-                        color = Color.LightGray,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )
                 }
                 status?.let {
-                    Text(it, color = Color.LightGray, fontSize = 13.sp)
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
                 }
             }
         },
@@ -661,12 +865,12 @@ private fun SpotifyImportDialog(
                 Text(
                     "Kochify übernimmt Playlistnamen, Titel und Interpreten. " +
                         "Vorhandene MP3s werden zugeordnet; fehlende Titel werden für später vorgemerkt.",
-                    color = Color.LightGray
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Spotify-Audiodateien werden nicht kopiert oder heruntergeladen.",
-                    color = SpotifyGreen,
+                    color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(14.dp))
@@ -689,7 +893,11 @@ private fun SpotifyImportDialog(
                 }
                 status?.let {
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = Color.LightGray, fontSize = 13.sp)
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
                 }
             }
         },
@@ -836,7 +1044,7 @@ private fun Cover(path: String?, size: Int) {
         modifier = Modifier
             .size(size.dp)
             .clip(RoundedCornerShape(7.dp))
-            .background(Color(0xFF303030)),
+            .background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center
     ) {
         if (bitmap != null) {
@@ -851,7 +1059,7 @@ private fun Cover(path: String?, size: Int) {
                 Icons.Default.MusicNote,
                 null,
                 modifier = Modifier.size((size / 2).dp),
-                tint = Color.LightGray
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
