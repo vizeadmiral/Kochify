@@ -11,6 +11,7 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - bearbeitbaren Titeln, Interpreten und Covern
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
+- automatische Kochify-Playlist, Gesamtfortschritt und Weiterlaufen bei einzelnen Fehlern
 - sichtbarer Rechtebestätigung vor jedem Link-Download
 
 ## Spotify-Playlists importieren
