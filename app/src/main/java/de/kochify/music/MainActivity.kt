@@ -286,7 +286,7 @@ private fun MusicApp(vm: MusicViewModel) {
     if (showThemePicker) {
         ThemePickerDialog(
             selected = vm.themeMode,
-            onSelect = vm::setThemeMode,
+            onSelect = vm::selectThemeMode,
             onDismiss = { showThemePicker = false }
         )
     }
