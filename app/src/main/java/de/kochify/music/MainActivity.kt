@@ -265,16 +265,24 @@ private fun Header(
                 Icon(Icons.Default.ArrowBack, "Zurück")
             }
         }
-        Text(
-            text = playlistName ?: when (mode) {
-                LibraryMode.ALL -> "Kochify"
-                LibraryMode.FAVORITES -> "Deine Favoriten"
-                LibraryMode.PLAYLIST -> "Deine Playlists"
-            },
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Black,
-            modifier = Modifier.weight(1f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = playlistName ?: when (mode) {
+                    LibraryMode.ALL -> "Kochify"
+                    LibraryMode.FAVORITES -> "Deine Favoriten"
+                    LibraryMode.PLAYLIST -> "Deine Playlists"
+                },
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Black
+            )
+            if (playlistName == null && mode == LibraryMode.ALL) {
+                Text(
+                    text = "Version ${BuildConfig.VERSION_NAME}",
+                    fontSize = 10.sp,
+                    color = Color.Gray
+                )
+            }
+        }
         IconButton(onClick = onImport) {
             Icon(Icons.Default.Add, "MP3 importieren")
         }
