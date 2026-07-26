@@ -300,10 +300,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun createYoutubeDownloadPlan(url: String): YoutubeDownloadPlan {
+        if (isYoutubePlaylistUrl(url)) {
+            return createYoutubePlaylistPlan(url)
+        }
+
         val request = YoutubeDLRequest(url).apply {
-            addOption("--flat-playlist")
             addOption("--dump-single-json")
-            addOption("--ignore-errors")
+            addOption("--no-playlist")
             addOption("--no-warnings")
             addOption("--remote-components", "ejs:github")
         }
@@ -315,37 +318,48 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             throw IllegalStateException("Die YouTube-Informationen konnten nicht gelesen werden.")
         }
         val root = JSONObject(jsonText.substring(jsonStart, jsonEnd + 1))
-        val entries = root.optJSONArray("entries")
-        val isPlaylist = entries != null || root.optString("_type") == "playlist"
+        return YoutubeDownloadPlan(
+            title = cleanDisplayName(root.optString("title"), "YouTube-Download"),
+            items = listOf(
+                YoutubeDownloadItem(
+                    id = root.optString("id"),
+                    title = cleanDisplayName(root.optString("title"), "YouTube-Titel"),
+                    url = url
+                )
+            ),
+            isPlaylist = false,
+            unavailableItems = 0
+        )
+    }
 
-        if (!isPlaylist) {
-            return YoutubeDownloadPlan(
-                title = cleanDisplayName(root.optString("title"), "YouTube-Download"),
-                items = listOf(
-                    YoutubeDownloadItem(
-                        id = root.optString("id"),
-                        title = cleanDisplayName(root.optString("title"), "YouTube-Titel"),
-                        url = url
-                    )
-                ),
-                isPlaylist = false,
-                unavailableItems = 0
-            )
+    private fun createYoutubePlaylistPlan(url: String): YoutubeDownloadPlan {
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--flat-playlist")
+            addOption("--dump-json")
+            addOption("--ignore-errors")
+            addOption("--no-warnings")
+            addOption("--remote-components", "ejs:github")
         }
+        val response = YoutubeDL.getInstance().execute(request)
+        val entries = response.out.lineSequence()
+            .mapNotNull { line ->
+                val start = line.indexOf('{')
+                val end = line.lastIndexOf('}')
+                if (start < 0 || end <= start) {
+                    null
+                } else {
+                    runCatching { JSONObject(line.substring(start, end + 1)) }.getOrNull()
+                }
+            }
+            .toList()
 
         val items = mutableListOf<YoutubeDownloadItem>()
         var unavailable = 0
-        val playlistEntries = entries ?: JSONArray()
-        repeat(playlistEntries.length()) { index ->
-            val entry = playlistEntries.optJSONObject(index)
-            if (entry == null) {
-                unavailable++
-                return@repeat
-            }
+        entries.forEachIndexed { index, entry ->
             val itemUrl = youtubeEntryUrl(entry)
             if (itemUrl == null) {
                 unavailable++
-                return@repeat
+                return@forEachIndexed
             }
             items += YoutubeDownloadItem(
                 id = entry.optString("id"),
@@ -358,18 +372,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (items.isEmpty()) {
             throw IllegalStateException(
-                "Die Playlist enthält keine verfügbaren Videos oder ist nicht zugänglich."
+                "Die Playlist enthält keine zugänglichen Videos. Gesperrte Einträge wurden " +
+                    "übersprungen."
             )
+        }
+        val playlistTitle = entries.firstNotNullOfOrNull { entry ->
+            entry.optString("playlist_title").takeIf { it.isNotBlank() }
+                ?: entry.optString("playlist").takeIf { it.isNotBlank() }
         }
         return YoutubeDownloadPlan(
             title = cleanDisplayName(
-                root.optString("title").ifBlank { root.optString("playlist_title") },
+                playlistTitle.orEmpty(),
                 "YouTube-Playlist"
             ),
             items = items,
             isPlaylist = true,
             unavailableItems = unavailable
         )
+    }
+
+    private fun isYoutubePlaylistUrl(value: String): Boolean {
+        val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return false
+        return !uri.getQueryParameter("list").isNullOrBlank() ||
+            uri.path.orEmpty().contains("/playlist", ignoreCase = true)
     }
 
     private fun youtubeEntryUrl(entry: JSONObject): String? {
