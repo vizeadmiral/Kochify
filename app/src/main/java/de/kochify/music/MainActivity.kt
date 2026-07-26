@@ -4,6 +4,7 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -18,6 +19,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -31,8 +33,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -41,6 +45,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
@@ -55,6 +60,8 @@ import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -73,6 +80,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -85,12 +94,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -185,6 +196,7 @@ private fun MusicApp(vm: MusicViewModel) {
     var showSpotifyImport by remember { mutableStateOf(false) }
     var showThemePicker by remember { mutableStateOf(false) }
     var showNewPlaylist by remember { mutableStateOf(false) }
+    var showNowPlaying by remember { mutableStateOf(false) }
     var editingTrack by remember { mutableStateOf<AudioTrack?>(null) }
     var playlistTrack by remember { mutableStateOf<AudioTrack?>(null) }
 
@@ -192,75 +204,104 @@ private fun MusicApp(vm: MusicViewModel) {
         ActivityResultContracts.GetMultipleContents()
     ) { uris -> vm.importAudio(uris) }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        bottomBar = {
-            Column {
-                vm.currentTrack?.let { MiniPlayer(vm, it) }
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                    NavigationBarItem(
-                        selected = mode == LibraryMode.ALL,
-                        onClick = { mode = LibraryMode.ALL },
-                        icon = { Icon(Icons.Default.LibraryMusic, null) },
-                        label = { Text("Bibliothek") }
-                    )
-                    NavigationBarItem(
-                        selected = mode == LibraryMode.FAVORITES,
-                        onClick = { mode = LibraryMode.FAVORITES },
-                        icon = { Icon(Icons.Default.Favorite, null) },
-                        label = { Text("Favoriten") }
-                    )
-                    NavigationBarItem(
-                        selected = mode == LibraryMode.PLAYLIST,
-                        onClick = {
-                            mode = LibraryMode.PLAYLIST
-                            vm.selectedPlaylist = null
-                        },
-                        icon = { Icon(Icons.Default.QueueMusic, null) },
-                        label = { Text("Playlists") }
-                    )
-                    NavigationBarItem(
-                        selected = false,
-                        onClick = { showThemePicker = true },
-                        icon = { Icon(Icons.Default.Palette, null) },
-                        label = { Text("Design") }
-                    )
+    val activeTrack = vm.currentTrack
+    BackHandler(enabled = showNowPlaying && activeTrack != null) {
+        showNowPlaying = false
+    }
+
+    if (showNowPlaying && activeTrack != null) {
+        NowPlayingScreen(
+            vm = vm,
+            track = activeTrack,
+            sourceName = vm.selectedPlaylist
+                ?: activeTrack.playlists.firstOrNull()
+                ?: "Kochify",
+            onClose = { showNowPlaying = false },
+            onEdit = { editingTrack = activeTrack },
+            onPlaylist = { playlistTrack = activeTrack },
+            onDelete = {
+                vm.deleteTrack(activeTrack)
+                showNowPlaying = false
+            }
+        )
+    } else {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            bottomBar = {
+                Column {
+                    vm.currentTrack?.let {
+                        MiniPlayer(
+                            vm = vm,
+                            track = it,
+                            onOpen = { showNowPlaying = true }
+                        )
+                    }
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                        NavigationBarItem(
+                            selected = mode == LibraryMode.ALL,
+                            onClick = { mode = LibraryMode.ALL },
+                            icon = { Icon(Icons.Default.LibraryMusic, null) },
+                            label = { Text("Bibliothek") }
+                        )
+                        NavigationBarItem(
+                            selected = mode == LibraryMode.FAVORITES,
+                            onClick = { mode = LibraryMode.FAVORITES },
+                            icon = { Icon(Icons.Default.Favorite, null) },
+                            label = { Text("Favoriten") }
+                        )
+                        NavigationBarItem(
+                            selected = mode == LibraryMode.PLAYLIST,
+                            onClick = {
+                                mode = LibraryMode.PLAYLIST
+                                vm.selectedPlaylist = null
+                            },
+                            icon = { Icon(Icons.Default.QueueMusic, null) },
+                            label = { Text("Playlists") }
+                        )
+                        NavigationBarItem(
+                            selected = false,
+                            onClick = { showThemePicker = true },
+                            icon = { Icon(Icons.Default.Palette, null) },
+                            label = { Text("Design") }
+                        )
+                    }
                 }
             }
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-        ) {
-            Header(
-                mode = mode,
-                playlistName = vm.selectedPlaylist,
-                onBack = { vm.selectedPlaylist = null },
-                onImport = { audioPicker.launch("audio/*") },
-                onDownload = { showDownload = true },
-                onSpotifyImport = { showSpotifyImport = true },
-                onNewPlaylist = { showNewPlaylist = true }
-            )
-            SearchField(vm)
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                Header(
+                    mode = mode,
+                    playlistName = vm.selectedPlaylist,
+                    onBack = { vm.selectedPlaylist = null },
+                    onImport = { audioPicker.launch("audio/*") },
+                    onDownload = { showDownload = true },
+                    onSpotifyImport = { showSpotifyImport = true },
+                    onNewPlaylist = { showNewPlaylist = true }
+                )
+                SearchField(vm)
 
-            if (mode == LibraryMode.PLAYLIST && vm.selectedPlaylist == null) {
-                PlaylistList(
-                    playlists = vm.playlists,
-                    onSelect = { vm.selectedPlaylist = it },
-                    onCreate = { showNewPlaylist = true },
-                    spotifyUrlFor = vm::spotifyPlaylistUrl,
-                    onOpenSpotify = vm::openSpotifyPlaylist
-                )
-            } else {
-                TrackList(
-                    tracks = vm.visibleTracks(mode),
-                    vm = vm,
-                    onEdit = { editingTrack = it },
-                    onPlaylist = { playlistTrack = it }
-                )
+                if (mode == LibraryMode.PLAYLIST && vm.selectedPlaylist == null) {
+                    PlaylistList(
+                        playlists = vm.playlists,
+                        onSelect = { vm.selectedPlaylist = it },
+                        onCreate = { showNewPlaylist = true },
+                        spotifyUrlFor = vm::spotifyPlaylistUrl,
+                        onOpenSpotify = vm::openSpotifyPlaylist
+                    )
+                } else {
+                    TrackList(
+                        tracks = vm.visibleTracks(mode),
+                        vm = vm,
+                        onOpenPlayer = { showNowPlaying = true },
+                        onEdit = { editingTrack = it },
+                        onPlaylist = { playlistTrack = it }
+                    )
+                }
             }
         }
     }
@@ -401,6 +442,7 @@ private fun SearchField(vm: MusicViewModel) {
 private fun TrackList(
     tracks: List<AudioTrack>,
     vm: MusicViewModel,
+    onOpenPlayer: () -> Unit,
     onEdit: (AudioTrack) -> Unit,
     onPlaylist: (AudioTrack) -> Unit
 ) {
@@ -429,7 +471,10 @@ private fun TrackList(
             TrackRow(
                 track = track,
                 isCurrent = vm.currentTrack?.id == track.id,
-                onPlay = { vm.play(track) },
+                onPlay = {
+                    vm.play(track)
+                    onOpenPlayer()
+                },
                 onFavorite = { vm.toggleFavorite(track.id) },
                 onEdit = { onEdit(track) },
                 onPlaylist = { onPlaylist(track) },
@@ -594,15 +639,22 @@ private fun PlaylistList(
 }
 
 @Composable
-private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
+private fun MiniPlayer(
+    vm: MusicViewModel,
+    track: AudioTrack,
+    onOpen: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .clickable(onClick = onOpen)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Cover(track.coverPath, 42)
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Cover(track.coverPath, 44)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -618,57 +670,368 @@ private fun MiniPlayer(vm: MusicViewModel, track: AudioTrack) {
                     fontSize = 12.sp
                 )
             }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = vm::toggleShuffle) {
-                Icon(
-                    Icons.Default.Shuffle,
-                    if (vm.shuffleEnabled) "Shuffle ausschalten" else "Shuffle einschalten",
-                    tint = if (vm.shuffleEnabled) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
-            }
-            IconButton(onClick = vm::previous) {
-                Icon(Icons.Default.NavigateBefore, "Zurück")
-            }
-            FilledIconButton(
-                onClick = vm::togglePlayback,
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primary
-                )
-            ) {
+            IconButton(onClick = vm::togglePlayback) {
                 Icon(
                     if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    if (vm.isPlaying) "Pause" else "Abspielen",
-                    tint = MaterialTheme.colorScheme.onPrimary
+                    if (vm.isPlaying) "Pause" else "Abspielen"
                 )
             }
             IconButton(onClick = vm::next) {
-                Icon(Icons.Default.NavigateNext, "Weiter")
-            }
-            IconButton(onClick = vm::toggleRepeatOne) {
-                Icon(
-                    Icons.Default.RepeatOne,
-                    if (vm.repeatOneEnabled) {
-                        "Endloswiederholung ausschalten"
-                    } else {
-                        "Titel endlos wiederholen"
-                    },
-                    tint = if (vm.repeatOneEnabled) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
+                Icon(Icons.Default.SkipNext, "Weiter")
             }
         }
+        val progress = if (vm.playbackDurationMs > 0L) {
+            (vm.playbackPositionMs.toFloat() / vm.playbackDurationMs)
+                .coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(2.dp),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun NowPlayingScreen(
+    vm: MusicViewModel,
+    track: AudioTrack,
+    sourceName: String,
+    onClose: () -> Unit,
+    onEdit: () -> Unit,
+    onPlaylist: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var expanded by remember(track.id) { mutableStateOf(false) }
+    var draggedPosition by remember(track.id) { mutableStateOf<Float?>(null) }
+    val duration = vm.playbackDurationMs.coerceAtLeast(1L).toFloat()
+    val shownPosition = (draggedPosition ?: vm.playbackPositionMs.toFloat())
+        .coerceIn(0f, duration)
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.surfaceVariant,
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.background
+                        )
+                    )
+                )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Default.KeyboardArrowDown, "Player schließen")
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "WIEDERGABE AUS",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            sourceName,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    Box {
+                        IconButton(onClick = { expanded = true }) {
+                            Icon(Icons.Default.MoreVert, "Songoptionen")
+                        }
+                        androidx.compose.material3.DropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (track.favorite) {
+                                            "Aus Favoriten entfernen"
+                                        } else {
+                                            "Zu Favoriten hinzufügen"
+                                        }
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (track.favorite) {
+                                            Icons.Default.Favorite
+                                        } else {
+                                            Icons.Default.FavoriteBorder
+                                        },
+                                        null
+                                    )
+                                },
+                                onClick = {
+                                    expanded = false
+                                    vm.toggleFavorite(track.id)
+                                }
+                            )
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Zu Playlist hinzufügen") },
+                                leadingIcon = { Icon(Icons.Default.PlaylistAdd, null) },
+                                onClick = {
+                                    expanded = false
+                                    onPlaylist()
+                                }
+                            )
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Titel und Cover bearbeiten") },
+                                leadingIcon = { Icon(Icons.Default.Edit, null) },
+                                onClick = {
+                                    expanded = false
+                                    onEdit()
+                                }
+                            )
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Aus der App löschen") },
+                                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                onClick = {
+                                    expanded = false
+                                    onDelete()
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(22.dp))
+                NowPlayingCover(track)
+                Spacer(Modifier.height(24.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            track.title,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                        Text(
+                            track.artist,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 16.sp
+                        )
+                    }
+                    IconButton(onClick = { vm.toggleFavorite(track.id) }) {
+                        Icon(
+                            if (track.favorite) {
+                                Icons.Default.Favorite
+                            } else {
+                                Icons.Default.FavoriteBorder
+                            },
+                            if (track.favorite) {
+                                "Aus Favoriten entfernen"
+                            } else {
+                                "Zu Favoriten hinzufügen"
+                            },
+                            tint = if (track.favorite) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Slider(
+                    value = shownPosition,
+                    onValueChange = { draggedPosition = it },
+                    onValueChangeFinished = {
+                        draggedPosition?.let { vm.seekTo(it.toLong()) }
+                        draggedPosition = null
+                    },
+                    valueRange = 0f..duration,
+                    enabled = vm.playbackDurationMs > 0L
+                )
+                Row(Modifier.fillMaxWidth()) {
+                    Text(
+                        formatPlaybackTime(shownPosition.toLong()),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        formatPlaybackTime(vm.playbackDurationMs),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = vm::toggleShuffle) {
+                        Icon(
+                            Icons.Default.Shuffle,
+                            if (vm.shuffleEnabled) {
+                                "Shuffle ausschalten"
+                            } else {
+                                "Shuffle einschalten"
+                            },
+                            tint = if (vm.shuffleEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                    IconButton(
+                        onClick = vm::previous,
+                        modifier = Modifier.size(56.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.SkipPrevious,
+                            "Vorheriger Titel",
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+                    FilledIconButton(
+                        onClick = vm::togglePlayback,
+                        modifier = Modifier.size(76.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.onSurface,
+                            contentColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Icon(
+                            if (vm.isPlaying) {
+                                Icons.Default.Pause
+                            } else {
+                                Icons.Default.PlayArrow
+                            },
+                            if (vm.isPlaying) "Pause" else "Abspielen",
+                            modifier = Modifier.size(42.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = vm::next,
+                        modifier = Modifier.size(56.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.SkipNext,
+                            "Nächster Titel",
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+                    IconButton(onClick = vm::toggleRepeatOne) {
+                        Icon(
+                            Icons.Default.RepeatOne,
+                            if (vm.repeatOneEnabled) {
+                                "Endloswiederholung ausschalten"
+                            } else {
+                                "Titel endlos wiederholen"
+                            },
+                            tint = if (vm.repeatOneEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    TextButton(onClick = onPlaylist) {
+                        Icon(Icons.Default.PlaylistAdd, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Playlist")
+                    }
+                    TextButton(onClick = onEdit) {
+                        Icon(Icons.Default.Edit, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Bearbeiten")
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun NowPlayingCover(track: AudioTrack) {
+    val bitmap = remember(track.coverPath) {
+        track.coverPath?.let {
+            runCatching { BitmapFactory.decodeFile(it) }.getOrNull()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap.asImageBitmap(),
+                contentDescription = "Cover von ${track.title}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Icon(
+                Icons.Default.MusicNote,
+                null,
+                modifier = Modifier.size(128.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+private fun formatPlaybackTime(milliseconds: Long): String {
+    val totalSeconds = (milliseconds.coerceAtLeast(0L) / 1_000L)
+    val hours = totalSeconds / 3_600L
+    val minutes = (totalSeconds % 3_600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
     }
 }
 
