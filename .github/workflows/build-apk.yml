@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -22,10 +22,29 @@ jobs:
           gradle-version: "8.10.2"
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
-      - name: Name APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk Kochify.apk
+      - name: Read version and name APK
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(sed -nE 's/.*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)
+          test -n "$VERSION"
+          cp app/build/outputs/apk/debug/app-debug.apk "Kochify-$VERSION.apk"
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: Kochify-APK
-          path: Kochify.apk
+          path: Kochify-${{ steps.version.outputs.name }}.apk
           if-no-files-found: error
+      - name: Publish public GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.name }}
+        shell: bash
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" "Kochify-$VERSION.apk" --clobber
+          else
+            gh release create "v$VERSION" "Kochify-$VERSION.apk" \
+              --title "Kochify $VERSION" \
+              --notes "Installierbare Android-Version von Kochify."
+          fi
