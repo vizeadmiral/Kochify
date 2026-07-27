@@ -99,7 +99,7 @@ class PlaybackKeepAliveService : Service() {
 
     private fun dispatchStop() {
         currentIsPlaying = false
-        PlaybackCommandBridge.stop()
+        PlaybackCommandBridge.pause()
         publishPlaybackNotification()
     }
 
@@ -261,20 +261,17 @@ internal object PlaybackCommandBridge {
     private var pauseAction: (() -> Unit)? = null
     private var nextAction: (() -> Unit)? = null
     private var previousAction: (() -> Unit)? = null
-    private var stopAction: (() -> Unit)? = null
 
     fun register(
         onPlay: () -> Unit,
         onPause: () -> Unit,
         onNext: () -> Unit,
-        onPrevious: () -> Unit,
-        onStop: () -> Unit
+        onPrevious: () -> Unit
     ) {
         playAction = onPlay
         pauseAction = onPause
         nextAction = onNext
         previousAction = onPrevious
-        stopAction = onStop
     }
 
     fun unregister() {
@@ -282,12 +279,10 @@ internal object PlaybackCommandBridge {
         pauseAction = null
         nextAction = null
         previousAction = null
-        stopAction = null
     }
 
     fun play() = playAction?.invoke() ?: Unit
     fun pause() = pauseAction?.invoke() ?: Unit
     fun next() = nextAction?.invoke() ?: Unit
     fun previous() = previousAction?.invoke() ?: Unit
-    fun stop() = stopAction?.invoke() ?: Unit
 }
