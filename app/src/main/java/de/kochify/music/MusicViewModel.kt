@@ -122,6 +122,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
         setWakeMode(C.WAKE_MODE_LOCAL)
     }
+    private var playbackQueue: List<AudioTrack> = emptyList()
 
     var search by mutableStateOf("")
     var selectedPlaylist by mutableStateOf<String?>(null)
@@ -1026,7 +1027,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         .replace(Regex("\\s*\\[[^]]*]"), "")
         .replace(Regex("[^\\p{L}\\p{N}]"), "")
 
-    fun play(track: AudioTrack) {
+    fun play(
+        track: AudioTrack,
+        queue: List<AudioTrack> = tracks.toList()
+    ) {
+        playbackQueue = queue.ifEmpty { tracks.toList() }
         currentTrack = track
         playbackPositionMs = 0L
         playbackDurationMs = 0L
@@ -1076,14 +1081,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun next() {
         val current = currentTrack ?: return
-        if (tracks.isEmpty()) return
-        if (shuffleEnabled && tracks.size > 1) {
-            val candidates = tracks.filter { it.id != current.id }
-            play(candidates.random())
+        val queue = activePlaybackQueue()
+        if (queue.isEmpty()) return
+        if (shuffleEnabled && queue.size > 1) {
+            val candidates = queue.filter { it.id != current.id }
+            play(candidates.random(), queue)
             return
         }
-        val index = tracks.indexOfFirst { it.id == current.id }
-        play(tracks[(index + 1).mod(tracks.size)])
+        val index = queue.indexOfFirst { it.id == current.id }
+            .takeIf { it >= 0 }
+            ?: 0
+        play(queue[(index + 1).mod(queue.size)], queue)
     }
 
     fun previous() {
@@ -1092,8 +1100,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             seekTo(0L)
             return
         }
-        val index = tracks.indexOfFirst { it.id == current.id }
-        if (tracks.isNotEmpty()) play(tracks[(index - 1).mod(tracks.size)])
+        val queue = activePlaybackQueue()
+        if (queue.isEmpty()) return
+        val index = queue.indexOfFirst { it.id == current.id }
+            .takeIf { it >= 0 }
+            ?: 0
+        play(queue[(index - 1).mod(queue.size)], queue)
+    }
+
+    private fun activePlaybackQueue(): List<AudioTrack> {
+        val availableIds = tracks.mapTo(hashSetOf()) { it.id }
+        return playbackQueue
+            .filter { it.id in availableIds }
+            .ifEmpty { tracks.toList() }
     }
 
     fun toggleFavorite(id: String) = update(id) { it.copy(favorite = !it.favorite) }
