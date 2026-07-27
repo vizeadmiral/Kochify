@@ -159,6 +159,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(value: Boolean) {
                 isPlaying = value
+                currentTrack?.let { track ->
+                    PlaybackKeepAliveService.start(
+                        app,
+                        track.title,
+                        track.artist,
+                        isPlaying = value
+                    )
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -169,6 +177,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         })
+        PlaybackCommandBridge.register(
+            onPlay = {
+                if (!player.isPlaying && currentTrack != null) player.play()
+            },
+            onPause = {
+                if (player.isPlaying) player.pause()
+            },
+            onNext = { next() },
+            onPrevious = { previous() }
+        )
         viewModelScope.launch {
             while (isActive) {
                 playbackPositionMs = player.currentPosition.coerceAtLeast(0L)
@@ -1320,6 +1338,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        PlaybackCommandBridge.unregister()
         player.release()
         PlaybackKeepAliveService.stop(app)
         super.onCleared()
