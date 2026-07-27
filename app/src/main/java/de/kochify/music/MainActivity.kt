@@ -537,7 +537,7 @@ private fun TrackList(
                 track = track,
                 isCurrent = vm.currentTrack?.id == track.id,
                 onPlay = {
-                    vm.play(track)
+                    vm.play(track, tracks)
                     onOpenPlayer()
                 },
                 onFavorite = { vm.toggleFavorite(track.id) },
