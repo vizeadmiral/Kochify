@@ -12,6 +12,7 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - Vollbild-Player mit großem Cover, Zeitleiste, Shuffle, Endloswiederholung und Songoptionen
 - zuverlässige Hintergrundwiedergabe mit Vordergrunddienst, Wake-Lock und Musikbenachrichtigung
 - Import und Export als Kochify-Sicherung, wahlweise mit allen Songs und Covern
+- Bluetooth- und Headset-Steuerung über Android MediaSession: Play/Pause, nächster und vorheriger Titel
 - bearbeitbaren Titeln, Interpreten und Covern
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
