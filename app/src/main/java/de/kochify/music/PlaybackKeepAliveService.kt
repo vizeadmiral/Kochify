@@ -14,6 +14,9 @@ import android.os.IBinder
 
 class PlaybackKeepAliveService : Service() {
     private lateinit var mediaSession: MediaSession
+    private var currentTitle = "Kochify"
+    private var currentArtist = "Musikwiedergabe"
+    private var currentIsPlaying = false
 
     override fun onCreate() {
         super.onCreate()
@@ -30,11 +33,11 @@ class PlaybackKeepAliveService : Service() {
 
         mediaSession = MediaSession(this, "KochifyPlayback").apply {
             setCallback(object : MediaSession.Callback() {
-                override fun onPlay() = PlaybackCommandBridge.play()
-                override fun onPause() = PlaybackCommandBridge.pause()
-                override fun onSkipToNext() = PlaybackCommandBridge.next()
-                override fun onSkipToPrevious() = PlaybackCommandBridge.previous()
-                override fun onStop() = PlaybackCommandBridge.pause()
+                override fun onPlay() = dispatchPlay()
+                override fun onPause() = dispatchPause()
+                override fun onSkipToNext() = dispatchNext()
+                override fun onSkipToPrevious() = dispatchPrevious()
+                override fun onStop() = dispatchStop()
             })
             isActive = true
         }
@@ -42,24 +45,25 @@ class PlaybackKeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val title = intent?.getStringExtra(EXTRA_TITLE)
-            ?.takeIf { it.isNotBlank() }
-            ?: "Kochify"
-        val artist = intent?.getStringExtra(EXTRA_ARTIST)
-            ?.takeIf { it.isNotBlank() }
-            ?: "Musikwiedergabe läuft"
-        val isPlaying = intent?.getBooleanExtra(EXTRA_IS_PLAYING, false) == true
-        mediaSession.setMetadata(
-            MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
-                .build()
-        )
-        updateSessionState(isPlaying)
-        startForeground(
-            NOTIFICATION_ID,
-            createNotification(title, artist)
-        )
+        when (intent?.action) {
+            ACTION_PLAY -> dispatchPlay()
+            ACTION_PAUSE -> dispatchPause()
+            ACTION_NEXT -> dispatchNext()
+            ACTION_PREVIOUS -> dispatchPrevious()
+            ACTION_STOP -> dispatchStop()
+            else -> {
+                currentTitle = intent?.getStringExtra(EXTRA_TITLE)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: currentTitle
+                currentArtist = intent?.getStringExtra(EXTRA_ARTIST)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: currentArtist
+                currentIsPlaying = intent
+                    ?.getBooleanExtra(EXTRA_IS_PLAYING, currentIsPlaying)
+                    ?: currentIsPlaying
+                publishPlaybackNotification()
+            }
+        }
         return START_NOT_STICKY
     }
 
@@ -70,6 +74,48 @@ class PlaybackKeepAliveService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun dispatchPlay() {
+        currentIsPlaying = true
+        PlaybackCommandBridge.play()
+        publishPlaybackNotification()
+    }
+
+    private fun dispatchPause() {
+        currentIsPlaying = false
+        PlaybackCommandBridge.pause()
+        publishPlaybackNotification()
+    }
+
+    private fun dispatchNext() {
+        PlaybackCommandBridge.next()
+        publishPlaybackNotification()
+    }
+
+    private fun dispatchPrevious() {
+        PlaybackCommandBridge.previous()
+        publishPlaybackNotification()
+    }
+
+    private fun dispatchStop() {
+        currentIsPlaying = false
+        PlaybackCommandBridge.stop()
+        publishPlaybackNotification()
+    }
+
+    private fun publishPlaybackNotification() {
+        mediaSession.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, currentArtist)
+                .build()
+        )
+        updateSessionState(currentIsPlaying)
+        startForeground(
+            NOTIFICATION_ID,
+            createNotification(currentTitle, currentArtist, currentIsPlaying)
+        )
+    }
 
     private fun updateSessionState(isPlaying: Boolean) {
         val state = if (isPlaying) {
@@ -95,7 +141,11 @@ class PlaybackKeepAliveService : Service() {
         )
     }
 
-    private fun createNotification(title: String, artist: String): Notification {
+    private fun createNotification(
+        title: String,
+        artist: String,
+        isPlaying: Boolean
+    ): Notification {
         val openApp = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -105,6 +155,14 @@ class PlaybackKeepAliveService : Service() {
             openApp,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val playPauseIcon = if (isPlaying) {
+            android.R.drawable.ic_media_pause
+        } else {
+            android.R.drawable.ic_media_play
+        }
+        val playPauseLabel = if (isPlaying) "Pause" else "Wiedergabe"
+        val playPauseAction = if (isPlaying) ACTION_PAUSE else ACTION_PLAY
+
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle(title)
@@ -113,17 +171,66 @@ class PlaybackKeepAliveService : Service() {
             .setContentIntent(contentIntent)
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .setStyle(Notification.MediaStyle().setMediaSession(mediaSession.sessionToken))
+            .addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_media_previous,
+                    "Vorheriger Titel",
+                    actionPendingIntent(ACTION_PREVIOUS, 1)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    playPauseIcon,
+                    playPauseLabel,
+                    actionPendingIntent(playPauseAction, 2)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_media_next,
+                    "Nächster Titel",
+                    actionPendingIntent(ACTION_NEXT, 3)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    "Stop",
+                    actionPendingIntent(ACTION_STOP, 4)
+                ).build()
+            )
+            .setStyle(
+                Notification.MediaStyle()
+                    .setMediaSession(mediaSession.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .build()
     }
 
+    private fun actionPendingIntent(action: String, requestCode: Int): PendingIntent {
+        val intent = Intent(this, PlaybackKeepAliveService::class.java).apply {
+            this.action = action
+        }
+        return PendingIntent.getService(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     companion object {
         private const val CHANNEL_ID = "kochify_playback"
         private const val NOTIFICATION_ID = 1202
         private const val ACTION_START = "de.kochify.music.action.START_PLAYBACK"
+        private const val ACTION_PLAY = "de.kochify.music.action.PLAY"
+        private const val ACTION_PAUSE = "de.kochify.music.action.PAUSE"
+        private const val ACTION_NEXT = "de.kochify.music.action.NEXT"
+        private const val ACTION_PREVIOUS = "de.kochify.music.action.PREVIOUS"
+        private const val ACTION_STOP = "de.kochify.music.action.STOP"
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_ARTIST = "artist"
         private const val EXTRA_IS_PLAYING = "isPlaying"
@@ -154,17 +261,20 @@ internal object PlaybackCommandBridge {
     private var pauseAction: (() -> Unit)? = null
     private var nextAction: (() -> Unit)? = null
     private var previousAction: (() -> Unit)? = null
+    private var stopAction: (() -> Unit)? = null
 
     fun register(
         onPlay: () -> Unit,
         onPause: () -> Unit,
         onNext: () -> Unit,
-        onPrevious: () -> Unit
+        onPrevious: () -> Unit,
+        onStop: () -> Unit
     ) {
         playAction = onPlay
         pauseAction = onPause
         nextAction = onNext
         previousAction = onPrevious
+        stopAction = onStop
     }
 
     fun unregister() {
@@ -172,10 +282,12 @@ internal object PlaybackCommandBridge {
         pauseAction = null
         nextAction = null
         previousAction = null
+        stopAction = null
     }
 
     fun play() = playAction?.invoke() ?: Unit
     fun pause() = pauseAction?.invoke() ?: Unit
     fun next() = nextAction?.invoke() ?: Unit
     fun previous() = previousAction?.invoke() ?: Unit
+    fun stop() = stopAction?.invoke() ?: Unit
 }
