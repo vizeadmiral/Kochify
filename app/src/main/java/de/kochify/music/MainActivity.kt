@@ -223,6 +223,8 @@ private fun MusicApp(vm: MusicViewModel) {
     var showNowPlaying by remember { mutableStateOf(false) }
     var editingTrack by remember { mutableStateOf<AudioTrack?>(null) }
     var playlistTrack by remember { mutableStateOf<AudioTrack?>(null) }
+    var renamingPlaylist by remember { mutableStateOf<String?>(null) }
+    var deletingPlaylist by remember { mutableStateOf<String?>(null) }
 
     val audioPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents()
@@ -239,8 +241,21 @@ private fun MusicApp(vm: MusicViewModel) {
     }
 
     val activeTrack = vm.currentTrack
-    BackHandler(enabled = showNowPlaying && activeTrack != null) {
-        showNowPlaying = false
+    val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
+        showBackup || showNewPlaylist || editingTrack != null || playlistTrack != null ||
+        renamingPlaylist != null || deletingPlaylist != null
+    BackHandler(
+        enabled = !hasOpenDialog &&
+            (showNowPlaying || vm.selectedPlaylist != null || mode != LibraryMode.ALL)
+    ) {
+        when {
+            showNowPlaying -> showNowPlaying = false
+            vm.selectedPlaylist != null -> vm.selectedPlaylist = null
+            mode != LibraryMode.ALL -> {
+                mode = LibraryMode.ALL
+                vm.selectedPlaylist = null
+            }
+        }
     }
 
     if (showNowPlaying && activeTrack != null) {
@@ -273,13 +288,19 @@ private fun MusicApp(vm: MusicViewModel) {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                         NavigationBarItem(
                             selected = mode == LibraryMode.ALL,
-                            onClick = { mode = LibraryMode.ALL },
+                            onClick = {
+                                mode = LibraryMode.ALL
+                                vm.selectedPlaylist = null
+                            },
                             icon = { Icon(Icons.Default.LibraryMusic, null) },
                             label = { Text("Bibliothek") }
                         )
                         NavigationBarItem(
                             selected = mode == LibraryMode.FAVORITES,
-                            onClick = { mode = LibraryMode.FAVORITES },
+                            onClick = {
+                                mode = LibraryMode.FAVORITES
+                                vm.selectedPlaylist = null
+                            },
                             icon = { Icon(Icons.Default.Favorite, null) },
                             label = { Text("Favoriten") }
                         )
@@ -331,7 +352,9 @@ private fun MusicApp(vm: MusicViewModel) {
                         onSelect = { vm.selectedPlaylist = it },
                         onCreate = { showNewPlaylist = true },
                         spotifyUrlFor = vm::spotifyPlaylistUrl,
-                        onOpenSpotify = vm::openSpotifyPlaylist
+                        onOpenSpotify = vm::openSpotifyPlaylist,
+                        onRename = { renamingPlaylist = it },
+                        onDelete = { deletingPlaylist = it }
                     )
                 } else {
                     TrackList(
@@ -404,6 +427,29 @@ private fun MusicApp(vm: MusicViewModel) {
             onConfirm = {
                 vm.createPlaylist(it)
                 showNewPlaylist = false
+            }
+        )
+    }
+    renamingPlaylist?.let { playlist ->
+        TextInputDialog(
+            title = "Playlist umbenennen",
+            label = "Neuer Name",
+            initialText = playlist,
+            confirmText = "Umbenennen",
+            onDismiss = { renamingPlaylist = null },
+            onConfirm = { newName ->
+                vm.renamePlaylist(playlist, newName)
+                renamingPlaylist = null
+            }
+        )
+    }
+    deletingPlaylist?.let { playlist ->
+        DeletePlaylistDialog(
+            playlist = playlist,
+            onDismiss = { deletingPlaylist = null },
+            onConfirm = {
+                vm.deletePlaylist(playlist)
+                deletingPlaylist = null
             }
         )
     }
@@ -634,7 +680,9 @@ private fun PlaylistList(
     onSelect: (String) -> Unit,
     onCreate: () -> Unit,
     spotifyUrlFor: (String) -> String?,
-    onOpenSpotify: (String) -> Unit
+    onOpenSpotify: (String) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit
 ) {
     LazyColumn(contentPadding = PaddingValues(16.dp)) {
         item {
@@ -655,6 +703,7 @@ private fun PlaylistList(
         }
         items(playlists) { playlist ->
             val spotifyUrl = spotifyUrlFor(playlist)
+            var expanded by remember(playlist) { mutableStateOf(false) }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -694,6 +743,32 @@ private fun PlaylistList(
                             Icons.Default.OpenInNew,
                             "Original in Spotify öffnen",
                             tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                Box {
+                    IconButton(onClick = { expanded = true }) {
+                        Icon(Icons.Default.MoreVert, "Playlist-Optionen")
+                    }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Playlist umbenennen") },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = {
+                                expanded = false
+                                onRename(playlist)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Playlist löschen") },
+                            leadingIcon = { Icon(Icons.Default.Delete, null) },
+                            onClick = {
+                                expanded = false
+                                onDelete(playlist)
+                            }
                         )
                     }
                 }
@@ -1509,10 +1584,12 @@ private fun PlaylistAssignmentDialog(
 private fun TextInputDialog(
     title: String,
     label: String,
+    initialText: String = "",
+    confirmText: String = "Erstellen",
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
 ) {
-    var text by remember { mutableStateOf("") }
+    var text by remember(initialText) { mutableStateOf(initialText) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -1526,10 +1603,36 @@ private fun TextInputDialog(
         },
         confirmButton = {
             Button(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) {
-                Text("Erstellen")
+                Text(confirmText)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Abbrechen") } }
+    )
+}
+
+@Composable
+private fun DeletePlaylistDialog(
+    playlist: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Playlist löschen?") },
+        text = {
+            Text(
+                "„$playlist“ wird gelöscht. Die enthaltenen Songs bleiben in " +
+                    "deiner Kochify-Bibliothek erhalten."
+            )
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("Playlist löschen")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen") }
+        }
     )
 }
 

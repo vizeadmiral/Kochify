@@ -1125,6 +1125,56 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun renamePlaylist(oldName: String, newName: String) {
+        val clean = newName.trim()
+        val playlistIndex = playlists.indexOf(oldName)
+        if (clean.isEmpty() || playlistIndex < 0 ||
+            (clean != oldName && clean in playlists)
+        ) {
+            return
+        }
+        if (clean == oldName) return
+
+        playlists[playlistIndex] = clean
+        tracks.indices.forEach { index ->
+            val track = tracks[index]
+            if (oldName in track.playlists) {
+                val updated = track.copy(
+                    playlists = (track.playlists - oldName) + clean
+                )
+                tracks[index] = updated
+                if (currentTrack?.id == updated.id) currentTrack = updated
+            }
+        }
+        pendingSpotifyTracks.indices.forEach { index ->
+            val pending = pendingSpotifyTracks[index]
+            if (pending.playlist == oldName) {
+                pendingSpotifyTracks[index] = pending.copy(playlist = clean)
+            }
+        }
+        spotifyPlaylistLinks.remove(oldName)?.let { url ->
+            spotifyPlaylistLinks[clean] = url
+        }
+        if (selectedPlaylist == oldName) selectedPlaylist = clean
+        save()
+    }
+
+    fun deletePlaylist(name: String) {
+        if (!playlists.remove(name)) return
+        tracks.indices.forEach { index ->
+            val track = tracks[index]
+            if (name in track.playlists) {
+                val updated = track.copy(playlists = track.playlists - name)
+                tracks[index] = updated
+                if (currentTrack?.id == updated.id) currentTrack = updated
+            }
+        }
+        pendingSpotifyTracks.removeAll { it.playlist == name }
+        spotifyPlaylistLinks.remove(name)
+        if (selectedPlaylist == name) selectedPlaylist = null
+        save()
+    }
+
     fun spotifyPlaylistUrl(name: String): String? = spotifyPlaylistLinks[name]
 
     fun openSpotifyPlaylist(name: String) {
