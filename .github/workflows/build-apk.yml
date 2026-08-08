@@ -20,7 +20,33 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
-      - name: Build debug APK
+      - name: Restore private Kochify signing key
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KOCHIFY_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KOCHIFY_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KOCHIFY_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KOCHIFY_KEY_PASSWORD }}
+        run: |
+          if test -z "$KEYSTORE_BASE64" || test -z "$KEYSTORE_PASSWORD" || \
+             test -z "$KEY_ALIAS" || test -z "$KEY_PASSWORD"; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Release signing secrets are not configured; running a compile-only debug build."
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/kochify-release.jks"
+          chmod 600 "$RUNNER_TEMP/kochify-release.jks"
+          echo "KOCHIFY_KEYSTORE_PATH=$RUNNER_TEMP/kochify-release.jks" >> "$GITHUB_ENV"
+          echo "KOCHIFY_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "KOCHIFY_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "KOCHIFY_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+      - name: Build fixed-signature release APK
+        if: steps.signing.outputs.available == 'true'
+        run: gradle :app:assembleRelease --stacktrace
+      - name: Compile-check debug APK
+        if: steps.signing.outputs.available != 'true'
         run: gradle :app:assembleDebug --stacktrace
       - name: Read version and name APK
         id: version
@@ -28,7 +54,13 @@ jobs:
         run: |
           VERSION=$(sed -nE 's/.*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)
           test -n "$VERSION"
-          cp app/build/outputs/apk/debug/app-debug.apk "Kochify-$VERSION.apk"
+          if test "${{ steps.signing.outputs.available }}" = "true"; then
+            SOURCE=app/build/outputs/apk/release/app-release.apk
+          else
+            SOURCE=app/build/outputs/apk/debug/app-debug.apk
+          fi
+          test -f "$SOURCE"
+          cp "$SOURCE" "Kochify-$VERSION.apk"
           echo "name=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
@@ -36,6 +68,7 @@ jobs:
           path: Kochify-${{ steps.version.outputs.name }}.apk
           if-no-files-found: error
       - name: Publish public GitHub release
+        if: steps.signing.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.name }}
@@ -46,5 +79,5 @@ jobs:
           else
             gh release create "v$VERSION" "Kochify-$VERSION.apk" \
               --title "Kochify $VERSION" \
-              --notes "Installierbare Android-Version von Kochify."
+              --notes "Kochify mit fester Update-Signatur. Ab dieser Version sind direkte Updates möglich."
           fi

@@ -9,4 +9,7 @@
     <cache-path
         name="shared_playlists"
         path="shared/" />
+    <cache-path
+        name="incoming_transfers"
+        path="incoming/" />
 </paths>

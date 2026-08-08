@@ -6,6 +6,7 @@ import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Environment
+import android.os.SystemClock
 import android.util.Base64
 import android.webkit.MimeTypeMap
 import android.widget.Toast
@@ -36,8 +37,19 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -68,6 +80,26 @@ data class SpotifyPlaylistImport(
     val tracks: List<PendingSpotifyTrack>
 )
 
+data class PlaybackHistoryEntry(
+    val trackId: String,
+    val title: String,
+    val artist: String,
+    val playedAt: Long
+)
+
+data class PlaybackStats(
+    val totalListeningMs: Long,
+    val totalPlays: Int,
+    val uniqueTracks: Int,
+    val mostPlayed: List<Pair<AudioTrack, Int>>,
+    val recent: List<PlaybackHistoryEntry>
+)
+
+data class LocalTransferOffer(
+    val title: String,
+    val qrPayload: String
+)
+
 enum class KochifyThemeMode {
     BLACK,
     LIGHT,
@@ -77,14 +109,16 @@ enum class KochifyThemeMode {
 private data class YoutubeDownloadItem(
     val id: String,
     val title: String,
-    val url: String
+    val url: String,
+    val thumbnailUrl: String?
 )
 
 private data class YoutubeDownloadPlan(
     val title: String,
     val items: List<YoutubeDownloadItem>,
     val isPlaylist: Boolean,
-    val unavailableItems: Int
+    val unavailableItems: Int,
+    val thumbnailUrl: String?
 )
 
 private const val SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
@@ -92,6 +126,8 @@ private const val SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 private const val SPOTIFY_API_URL = "https://api.spotify.com/v1"
 private const val SPOTIFY_REDIRECT_URI = "kochify://spotify-callback"
 private const val YTDLP_UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L
+private const val LOCAL_TRANSFER_MAGIC = "KOCHIFY_LOCAL_1"
+private const val LOCAL_TRANSFER_MAX_BYTES = 8L * 1024L * 1024L * 1024L
 
 private class SpotifyHttpException(
     val statusCode: Int,
@@ -116,8 +152,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     val tracks = mutableStateListOf<AudioTrack>()
     val playlists = mutableStateListOf<String>()
+    val playlistCovers = mutableStateMapOf<String, String>()
+    private val playlistOrders = mutableStateMapOf<String, List<String>>()
     private val pendingSpotifyTracks = mutableStateListOf<PendingSpotifyTrack>()
     private val spotifyPlaylistLinks = mutableStateMapOf<String, String>()
+    val playbackHistory = mutableStateListOf<PlaybackHistoryEntry>()
+    private val playCounts = mutableStateMapOf<String, Int>()
     val player = ExoPlayer.Builder(app).build().apply {
         setAudioAttributes(
             AudioAttributes.Builder()
@@ -129,6 +169,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         setWakeMode(C.WAKE_MODE_LOCAL)
     }
     private var playbackQueue: List<AudioTrack> = emptyList()
+    private var activeListeningStartedAt = 0L
+    private var transferServer: ServerSocket? = null
 
     var search by mutableStateOf("")
     var selectedPlaylist by mutableStateOf<String?>(null)
@@ -140,6 +182,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var shuffleEnabled by mutableStateOf(prefs.getBoolean("shuffle_enabled", false))
     var repeatOneEnabled by mutableStateOf(prefs.getBoolean("repeat_one_enabled", false))
+    var totalListeningMs by mutableLongStateOf(prefs.getLong("total_listening_ms", 0L))
+        private set
     var themeMode by mutableStateOf(
         runCatching {
             KochifyThemeMode.valueOf(
@@ -155,6 +199,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     var isSpotifyImporting by mutableStateOf(false)
     var backupStatus by mutableStateOf<String?>(null)
     var isBackupBusy by mutableStateOf(false)
+    var localTransferOffer by mutableStateOf<LocalTransferOffer?>(null)
+        private set
+    var localTransferStatus by mutableStateOf<String?>(null)
+        private set
+    var isLocalTransferBusy by mutableStateOf(false)
+        private set
     val spotifyClientId: String
         get() = prefs.getString("spotify_client_id", "").orEmpty()
 
@@ -166,6 +216,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(value: Boolean) {
                 isPlaying = value
+                updateListeningSession(value)
                 currentTrack?.let { track ->
                     PlaybackKeepAliveService.start(
                         app,
@@ -216,6 +267,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (isBackupBusy) return
         val trackSnapshot = tracks.toList()
         val playlistSnapshot = playlists.toList()
+        val playlistCoverSnapshot = playlistCovers.toMap()
         val themeSnapshot = themeMode
         val shuffleSnapshot = shuffleEnabled
         val repeatSnapshot = repeatOneEnabled
@@ -232,6 +284,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     uri = uri,
                     tracks = trackSnapshot,
                     playlists = playlistSnapshot,
+                    playlistCovers = playlistCoverSnapshot,
                     themeMode = themeSnapshot,
                     shuffleEnabled = shuffleSnapshot,
                     repeatOneEnabled = repeatSnapshot,
@@ -294,8 +347,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ).show()
             return
         }
-        val playlistTracks = tracks
-            .filter { name in it.playlists }
+        val playlistTracks = orderedPlaylistTracks(name)
             .map { it.copy(favorite = false, playlists = setOf(name)) }
         val themeSnapshot = themeMode
         val shuffleSnapshot = shuffleEnabled
@@ -309,30 +361,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val shareDir = File(app.cacheDir, "shared").apply { mkdirs() }
-                val shareFile = File(
-                    shareDir,
-                    "${safeFileName(name)}-${System.currentTimeMillis()}.kochify"
-                ).apply {
-                    parentFile?.mkdirs()
-                    createNewFile()
-                }
-                val uri = FileProvider.getUriForFile(
-                    app,
-                    "${app.packageName}.fileprovider",
-                    shareFile
+                val shareFile = createTransferPackage(
+                    fileName = name,
+                    packageTracks = playlistTracks,
+                    packagePlaylists = listOf(name),
+                    packagePlaylistCovers = playlistCovers[name]
+                        ?.let { mapOf(name to it) }
+                        .orEmpty(),
+                    theme = themeSnapshot,
+                    shuffle = shuffleSnapshot,
+                    repeat = repeatSnapshot
                 )
-                KochifyBackupManager.export(
-                    context = app,
-                    uri = uri,
-                    tracks = playlistTracks,
-                    playlists = listOf(name),
-                    themeMode = themeSnapshot,
-                    shuffleEnabled = shuffleSnapshot,
-                    repeatOneEnabled = repeatSnapshot,
-                    includeMusic = true,
-                    includeSettings = false
-                )
+                val uri = fileProviderUri(shareFile)
                 withContext(Dispatchers.Main) {
                     launchShareChooser(
                         uri = uri,
@@ -356,6 +396,206 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startPlaylistLocalTransfer(name: String) {
+        val packageTracks = orderedPlaylistTracks(name)
+            .map { it.copy(favorite = false, playlists = setOf(name)) }
+        startLocalTransfer(
+            title = "Playlist: $name",
+            fileName = name,
+            packageTracks = packageTracks,
+            packagePlaylists = listOf(name),
+            packagePlaylistCovers = playlistCovers[name]
+                ?.let { mapOf(name to it) }
+                .orEmpty()
+        )
+    }
+
+    fun startTrackLocalTransfer(track: AudioTrack) {
+        startLocalTransfer(
+            title = "Song: ${track.title}",
+            fileName = track.title,
+            packageTracks = listOf(track.copy(favorite = false, playlists = emptySet())),
+            packagePlaylists = emptyList(),
+            packagePlaylistCovers = emptyMap()
+        )
+    }
+
+    private fun startLocalTransfer(
+        title: String,
+        fileName: String,
+        packageTracks: List<AudioTrack>,
+        packagePlaylists: List<String>,
+        packagePlaylistCovers: Map<String, String>
+    ) {
+        if (isLocalTransferBusy) return
+        closeLocalTransfer(clearStatus = false)
+        isLocalTransferBusy = true
+        localTransferStatus = "Übertragung wird vorbereitet …"
+        val themeSnapshot = themeMode
+        val shuffleSnapshot = shuffleEnabled
+        val repeatSnapshot = repeatOneEnabled
+        viewModelScope.launch(Dispatchers.IO) {
+            var server: ServerSocket? = null
+            try {
+                require(packageTracks.isNotEmpty()) { "Es sind keine Songs zum Übertragen vorhanden." }
+                val transferFile = createTransferPackage(
+                    fileName = fileName,
+                    packageTracks = packageTracks,
+                    packagePlaylists = packagePlaylists,
+                    packagePlaylistCovers = packagePlaylistCovers,
+                    theme = themeSnapshot,
+                    shuffle = shuffleSnapshot,
+                    repeat = repeatSnapshot
+                )
+                val host = localIpv4Address()
+                    ?: error("Kein lokales WLAN gefunden. Beide Handys müssen im selben WLAN sein.")
+                val token = randomUrlSafe(24)
+                val activeServer = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(0))
+                    soTimeout = 5 * 60 * 1000
+                }
+                server = activeServer
+                transferServer = activeServer
+                val payload = JSONObject().apply {
+                    put("version", 1)
+                    put("host", host)
+                    put("port", activeServer.localPort)
+                    put("token", token)
+                }.toString()
+                val encoded = Base64.encodeToString(
+                    payload.toByteArray(StandardCharsets.UTF_8),
+                    Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+                )
+                withContext(Dispatchers.Main) {
+                    localTransferOffer = LocalTransferOffer(
+                        title = title,
+                        qrPayload = "kochify://transfer/$encoded"
+                    )
+                    localTransferStatus =
+                        "QR-Code am anderen Handy in Kochify scannen. Beide Geräte müssen " +
+                            "im selben WLAN sein."
+                    isLocalTransferBusy = false
+                }
+
+                val client = activeServer.accept()
+                client.use { socket -> sendTransferFile(socket, token, transferFile) }
+                withContext(Dispatchers.Main) {
+                    localTransferOffer = null
+                    localTransferStatus = "Übertragung erfolgreich abgeschlossen."
+                }
+                transferFile.delete()
+            } catch (_: SocketTimeoutException) {
+                withContext(Dispatchers.Main) {
+                    localTransferOffer = null
+                    localTransferStatus = "QR-Code abgelaufen. Bitte neu starten."
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    localTransferOffer = null
+                    localTransferStatus = "Übertragung beendet: " +
+                        (e.message ?: "Verbindung geschlossen").take(220)
+                }
+            } finally {
+                runCatching { server?.close() }
+                if (transferServer === server) transferServer = null
+                withContext(Dispatchers.Main) { isLocalTransferBusy = false }
+            }
+        }
+    }
+
+    fun receiveLocalTransfer(qrPayload: String) {
+        if (isLocalTransferBusy) return
+        isLocalTransferBusy = true
+        localTransferStatus = "Verbindung wird hergestellt …"
+        viewModelScope.launch(Dispatchers.IO) {
+            var incoming: File? = null
+            try {
+                val uri = Uri.parse(qrPayload.trim())
+                require(uri.scheme == "kochify" && uri.host == "transfer") {
+                    "Dieser QR-Code gehört nicht zu Kochify."
+                }
+                val encoded = uri.lastPathSegment.orEmpty()
+                val details = JSONObject(
+                    Base64.decode(
+                        encoded,
+                        Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+                    ).toString(StandardCharsets.UTF_8)
+                )
+                require(details.optInt("version") == 1) { "Unbekannte QR-Version." }
+                val host = details.getString("host")
+                val port = details.getInt("port")
+                val token = details.getString("token")
+                val address = InetAddress.getByName(host)
+                require(address.isSiteLocalAddress || address.isLinkLocalAddress) {
+                    "Der QR-Code verweist nicht auf das lokale WLAN."
+                }
+                require(port in 1024..65535 && token.length >= 20) {
+                    "Der QR-Code ist unvollständig."
+                }
+                val incomingFile = File(
+                    File(app.cacheDir, "incoming").apply { mkdirs() },
+                    "Kochify-${System.currentTimeMillis()}.kochify"
+                )
+                incoming = incomingFile
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(address, port), 15_000)
+                    socket.soTimeout = 60_000
+                    val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+                    output.writeUTF(token)
+                    output.flush()
+                    val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
+                    require(input.readUTF() == LOCAL_TRANSFER_MAGIC) {
+                        "Die Gegenstelle ist keine Kochify-App."
+                    }
+                    val size = input.readLong()
+                    require(size in 1L..LOCAL_TRANSFER_MAX_BYTES) {
+                        "Die Übertragungsdatei ist ungültig oder zu groß."
+                    }
+                    require(size < app.cacheDir.usableSpace) {
+                        "Auf dem Handy ist nicht genug freier Speicher."
+                    }
+                    incomingFile.outputStream().use { fileOutput ->
+                        val buffer = ByteArray(64 * 1024)
+                        var remaining = size
+                        while (remaining > 0L) {
+                            val count = input.read(
+                                buffer,
+                                0,
+                                minOf(buffer.size.toLong(), remaining).toInt()
+                            )
+                            require(count > 0) { "Die Verbindung wurde zu früh getrennt." }
+                            fileOutput.write(buffer, 0, count)
+                            remaining -= count
+                        }
+                    }
+                }
+                val imported = KochifyBackupManager.import(app, fileProviderUri(incomingFile))
+                withContext(Dispatchers.Main) {
+                    localTransferOffer = null
+                    localTransferStatus = mergeImportedBackup(imported)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    localTransferStatus = "Empfang fehlgeschlagen: " +
+                        (e.message ?: "Unbekannter Fehler").take(220)
+                }
+            } finally {
+                incoming?.delete()
+                withContext(Dispatchers.Main) { isLocalTransferBusy = false }
+            }
+        }
+    }
+
+    fun closeLocalTransfer(clearStatus: Boolean = true) {
+        val server = transferServer
+        transferServer = null
+        runCatching { server?.close() }
+        localTransferOffer = null
+        if (clearStatus) localTransferStatus = null
+        isLocalTransferBusy = false
+    }
+
     fun importKochifyBackup(uri: Uri) {
         if (isBackupBusy) return
         isBackupBusy = true
@@ -364,76 +604,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val imported = KochifyBackupManager.import(app, uri)
                 withContext(Dispatchers.Main) {
-                    imported.playlists.forEach { playlist ->
-                        if (playlist !in playlists) playlists.add(playlist)
-                    }
-                    var restoredTracks = 0
-                    var matchedTracks = 0
-                    var missingTracks = 0
-                    imported.tracks.forEach { backupTrack ->
-                        val existingIndex = tracks.indexOfFirst {
-                            spotifyMatches(
-                                it.title,
-                                it.artist,
-                                backupTrack.title,
-                                backupTrack.artist
-                            )
-                        }
-                        if (existingIndex >= 0) {
-                            val existing = tracks[existingIndex]
-                            val updated = existing.copy(
-                                favorite = existing.favorite || backupTrack.favorite,
-                                playlists = existing.playlists + backupTrack.playlists,
-                                coverPath = backupTrack.coverPath ?: existing.coverPath
-                            )
-                            tracks[existingIndex] = updated
-                            if (currentTrack?.id == updated.id) currentTrack = updated
-                            backupTrack.audioPath?.let { File(it).delete() }
-                            matchedTracks++
-                        } else if (backupTrack.audioPath != null) {
-                            tracks.add(
-                                AudioTrack(
-                                    id = UUID.randomUUID().toString(),
-                                    title = backupTrack.title,
-                                    artist = backupTrack.artist,
-                                    path = backupTrack.audioPath,
-                                    coverPath = backupTrack.coverPath,
-                                    favorite = backupTrack.favorite,
-                                    playlists = backupTrack.playlists
-                                )
-                            )
-                            restoredTracks++
-                        } else {
-                            backupTrack.coverPath?.let { File(it).delete() }
-                            missingTracks++
-                        }
-                    }
-
-                    if (imported.includeSettings) {
-                        themeMode = imported.themeMode
-                        shuffleEnabled = imported.shuffleEnabled
-                        repeatOneEnabled = imported.repeatOneEnabled
-                        player.repeatMode = if (repeatOneEnabled) {
-                            Player.REPEAT_MODE_ONE
-                        } else {
-                            Player.REPEAT_MODE_OFF
-                        }
-                        prefs.edit()
-                            .putString("theme_mode", themeMode.name)
-                            .putBoolean("shuffle_enabled", shuffleEnabled)
-                            .putBoolean("repeat_one_enabled", repeatOneEnabled)
-                            .apply()
-                    }
-                    save()
-                    backupStatus = buildString {
-                        append("Import abgeschlossen: ${imported.playlists.size} Playlists")
-                        if (restoredTracks > 0) append(", $restoredTracks Songs wiederhergestellt")
-                        if (matchedTracks > 0) append(", $matchedTracks vorhandene Songs zugeordnet")
-                        if (missingTracks > 0) {
-                            append(", $missingTracks Songs ohne Audiodatei übersprungen")
-                        }
-                        append(".")
-                    }
+                    backupStatus = mergeImportedBackup(imported)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -476,7 +647,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadFromYoutube(url: String) {
+    fun downloadFromYoutube(url: String, useYoutubeCovers: Boolean = true) {
         if (url.isBlank() || isDownloading) return
         val cleanUrl = url.trim()
         if (!isYoutubeUrl(cleanUrl)) {
@@ -505,9 +676,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 ).apply { mkdirs() }
 
                 if (playlistName != null) {
+                    if (useYoutubeCovers) {
+                        val playlistThumbnail = plan.thumbnailUrl
+                            ?: plan.items.firstNotNullOfOrNull { it.thumbnailUrl }
+                        playlistThumbnail?.let { thumbnail ->
+                            downloadRemoteCover(
+                                thumbnail,
+                                "playlist-${stableKey(playlistName)}"
+                            )?.let { cover ->
+                                withContext(Dispatchers.Main) {
+                                    playlistCovers[playlistName] = cover.absolutePath
+                                    save()
+                                }
+                            }
+                        }
+                    }
                     withContext(Dispatchers.Main) {
                         if (playlistName !in playlists) {
                             playlists.add(playlistName)
+                            playlistOrders[playlistName] = emptyList()
                             save()
                         }
                         downloadStatus = buildString {
@@ -574,7 +761,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         if (itemFiles.isEmpty()) {
                             failures += item.title
                         } else {
-                            itemFiles.forEach { addFile(it, playlistName) }
+                            val coverPath = if (useYoutubeCovers) {
+                                item.thumbnailUrl?.let { thumbnail ->
+                                    downloadRemoteCover(
+                                        thumbnail,
+                                        "youtube-${stableKey(item.id.ifBlank { item.url })}"
+                                    )?.absolutePath
+                                }
+                            } else {
+                                null
+                            }
+                            itemFiles.forEach { addFile(it, playlistName, coverPath) }
                             if (newFiles.isEmpty()) reused++ else completed++
                         }
                     } catch (_: Exception) {
@@ -626,11 +823,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 YoutubeDownloadItem(
                     id = root.optString("id"),
                     title = cleanDisplayName(root.optString("title"), "YouTube-Titel"),
-                    url = url
+                    url = url,
+                    thumbnailUrl = youtubeThumbnailUrl(root)
                 )
             ),
             isPlaylist = false,
-            unavailableItems = 0
+            unavailableItems = 0,
+            thumbnailUrl = youtubeThumbnailUrl(root)
         )
     }
 
@@ -669,7 +868,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     entry.optString("title").ifBlank { entry.optString("fulltitle") },
                     "Titel ${index + 1}"
                 ),
-                url = itemUrl
+                url = itemUrl,
+                thumbnailUrl = youtubeThumbnailUrl(entry)
             )
         }
         if (items.isEmpty()) {
@@ -689,8 +889,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ),
             items = items,
             isPlaylist = true,
-            unavailableItems = unavailable
+            unavailableItems = unavailable,
+            thumbnailUrl = entries.firstNotNullOfOrNull { entry ->
+                entry.optString("playlist_thumbnail").takeIf { it.startsWith("https://") }
+                    ?: entry.optJSONArray("playlist_thumbnails")
+                        ?.let(::bestThumbnailUrl)
+            }
         )
+    }
+
+    private fun youtubeThumbnailUrl(item: JSONObject): String? =
+        item.optString("thumbnail").takeIf { it.startsWith("https://") }
+            ?: item.optJSONArray("thumbnails")?.let(::bestThumbnailUrl)
+
+    private fun bestThumbnailUrl(items: JSONArray): String? {
+        var bestUrl: String? = null
+        var bestWidth = -1
+        repeat(items.length()) { index ->
+            val thumbnail = items.optJSONObject(index) ?: return@repeat
+            val url = thumbnail.optString("url")
+            if (!url.startsWith("https://")) return@repeat
+            val width = thumbnail.optInt("width", index)
+            if (width >= bestWidth) {
+                bestWidth = width
+                bestUrl = url
+            }
+        }
+        return bestUrl
     }
 
     private fun isYoutubePlaylistUrl(value: String): Boolean {
@@ -738,6 +963,116 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         .trimEnd('.')
         .take(80)
         .ifBlank { "YouTube-Playlist" }
+
+    private fun stableKey(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(StandardCharsets.UTF_8))
+        return digest.take(12).joinToString("") { "%02x".format(it) }
+    }
+
+    private fun downloadRemoteCover(url: String, fileStem: String): File? = runCatching {
+        val parsed = URL(url)
+        require(parsed.protocol == "https")
+        val target = File(coversDir, "$fileStem-${System.currentTimeMillis()}.jpg")
+        val connection = (parsed.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15_000
+            readTimeout = 20_000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "Kochify/${BuildConfig.VERSION_NAME}")
+        }
+        try {
+            require(connection.responseCode in 200..299)
+            val contentType = connection.contentType.orEmpty().lowercase()
+            require(contentType.isBlank() || contentType.startsWith("image/"))
+            val announcedSize = connection.contentLengthLong
+            require(announcedSize <= 12L * 1024L * 1024L)
+            connection.inputStream.use { input ->
+                target.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var written = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        written += count
+                        require(written <= 12L * 1024L * 1024L)
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+            require(target.length() > 0L)
+            target
+        } catch (error: Exception) {
+            target.delete()
+            throw error
+        } finally {
+            connection.disconnect()
+        }
+    }.getOrNull()
+
+    private fun createTransferPackage(
+        fileName: String,
+        packageTracks: List<AudioTrack>,
+        packagePlaylists: List<String>,
+        packagePlaylistCovers: Map<String, String>,
+        theme: KochifyThemeMode,
+        shuffle: Boolean,
+        repeat: Boolean
+    ): File {
+        val shareDir = File(app.cacheDir, "shared").apply { mkdirs() }
+        val shareFile = File(
+            shareDir,
+            "${safeFileName(fileName)}-${System.currentTimeMillis()}.kochify"
+        ).apply { createNewFile() }
+        KochifyBackupManager.export(
+            context = app,
+            uri = fileProviderUri(shareFile),
+            tracks = packageTracks,
+            playlists = packagePlaylists,
+            playlistCovers = packagePlaylistCovers,
+            themeMode = theme,
+            shuffleEnabled = shuffle,
+            repeatOneEnabled = repeat,
+            includeMusic = true,
+            includeSettings = false
+        )
+        return shareFile
+    }
+
+    private fun fileProviderUri(file: File): Uri = FileProvider.getUriForFile(
+        app,
+        "${app.packageName}.fileprovider",
+        file
+    )
+
+    private fun sendTransferFile(socket: Socket, token: String, file: File) {
+        socket.soTimeout = 60_000
+        val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
+        require(input.readUTF() == token) { "Ungültiger Übertragungscode." }
+        val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+        output.writeUTF(LOCAL_TRANSFER_MAGIC)
+        output.writeLong(file.length())
+        file.inputStream().use { it.copyTo(output, 64 * 1024) }
+        output.flush()
+    }
+
+    private fun localIpv4Address(): String? {
+        val candidates = mutableListOf<Pair<String, String>>()
+        val networkInterfaces = NetworkInterface.getNetworkInterfaces() ?: return null
+        while (networkInterfaces.hasMoreElements()) {
+            val network = networkInterfaces.nextElement()
+            if (!network.isUp || network.isLoopback || network.isVirtual) continue
+            val addresses = network.inetAddresses
+            while (addresses.hasMoreElements()) {
+                val address = addresses.nextElement()
+                if (address is Inet4Address && address.isSiteLocalAddress) {
+                    candidates += network.name to address.hostAddress.orEmpty()
+                }
+            }
+        }
+        return candidates.sortedBy { (name, _) ->
+            if (name.contains("wlan", true) || name.contains("wifi", true)) 0 else 1
+        }.firstOrNull()?.second
+    }
 
     private fun launchShareChooser(
         uri: Uri,
@@ -1038,7 +1373,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         imported.forEach { spotifyPlaylist ->
             val playlistName = spotifyPlaylist.name
             val importedTracks = spotifyPlaylist.tracks
-            if (playlistName !in playlists) playlists.add(playlistName)
+            if (playlistName !in playlists) {
+                playlists.add(playlistName)
+                playlistOrders[playlistName] = emptyList()
+            }
             if (spotifyPlaylist.spotifyUrl.isNotBlank()) {
                 spotifyPlaylistLinks[playlistName] = spotifyPlaylist.spotifyUrl
             }
@@ -1051,6 +1389,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     tracks[trackIndex] = localTrack.copy(
                         playlists = localTrack.playlists + playlistName
                     )
+                    ensurePlaylistOrder(playlistName, localTrack.id)
                     matched++
                 } else {
                     val exists = pendingSpotifyTracks.any {
@@ -1160,6 +1499,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         track: AudioTrack,
         queue: List<AudioTrack> = tracks.toList()
     ) {
+        recordPlay(track)
         playbackQueue = queue.ifEmpty { tracks.toList() }
         currentTrack = track
         playbackPositionMs = 0L
@@ -1208,6 +1548,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString("theme_mode", mode.name).apply()
     }
 
+    fun playbackStats(): PlaybackStats {
+        val top = playCounts.entries
+            .sortedByDescending { it.value }
+            .mapNotNull { (trackId, count) ->
+                tracks.firstOrNull { it.id == trackId }?.let { it to count }
+            }
+            .take(5)
+        return PlaybackStats(
+            totalListeningMs = currentListeningTotal(),
+            totalPlays = playCounts.values.sum(),
+            uniqueTracks = playCounts.count { it.value > 0 },
+            mostPlayed = top,
+            recent = playbackHistory.take(30)
+        )
+    }
+
     fun next() {
         val current = currentTrack ?: return
         val queue = activePlaybackQueue()
@@ -1250,6 +1606,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val clean = name.trim()
         if (clean.isNotEmpty() && clean !in playlists) {
             playlists.add(clean)
+            playlistOrders[clean] = emptyList()
             save()
         }
     }
@@ -1284,6 +1641,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         spotifyPlaylistLinks.remove(oldName)?.let { url ->
             spotifyPlaylistLinks[clean] = url
         }
+        playlistCovers.remove(oldName)?.let { playlistCovers[clean] = it }
+        playlistOrders.remove(oldName)?.let { playlistOrders[clean] = it }
         if (selectedPlaylist == oldName) selectedPlaylist = clean
         save()
     }
@@ -1300,6 +1659,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         pendingSpotifyTracks.removeAll { it.playlist == name }
         spotifyPlaylistLinks.remove(name)
+        playlistCovers.remove(name)?.let { path ->
+            if (path.startsWith(coversDir.absolutePath)) File(path).delete()
+        }
+        playlistOrders.remove(name)
         if (selectedPlaylist == name) selectedPlaylist = null
         save()
     }
@@ -1318,8 +1681,57 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlaylist(id: String, playlist: String) = update(id) { track ->
         val next = track.playlists.toMutableSet()
-        if (!next.add(playlist)) next.remove(playlist)
+        if (next.add(playlist)) {
+            ensurePlaylistOrder(playlist, id)
+        } else {
+            next.remove(playlist)
+            playlistOrders[playlist] = playlistOrders[playlist].orEmpty() - id
+        }
         track.copy(playlists = next)
+    }
+
+    fun playlistCover(name: String): String? = playlistCovers[name]
+        ?.takeIf { File(it).isFile }
+        ?: orderedPlaylistTracks(name).firstNotNullOfOrNull { track ->
+            track.coverPath?.takeIf { File(it).isFile }
+        }
+
+    fun setPlaylistCover(name: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val target = File(
+                    coversDir,
+                    "playlist-${stableKey(name)}-${System.currentTimeMillis()}.jpg"
+                )
+                app.contentResolver.openInputStream(uri)!!.use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+                withContext(Dispatchers.Main) {
+                    playlistCovers.put(name, target.absolutePath)?.let { oldPath ->
+                        if (oldPath != target.absolutePath && oldPath.startsWith(coversDir.path)) {
+                            File(oldPath).delete()
+                        }
+                    }
+                    save()
+                }
+            } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    downloadStatus = "Playlist-Cover konnte nicht übernommen werden."
+                }
+            }
+        }
+    }
+
+    fun moveTrackInPlaylist(playlist: String, trackId: String, direction: Int) {
+        val order = orderedPlaylistTracks(playlist).map { it.id }.toMutableList()
+        val from = order.indexOf(trackId)
+        if (from < 0) return
+        val to = (from + direction).coerceIn(0, order.lastIndex)
+        if (from == to) return
+        val moved = order.removeAt(from)
+        order.add(to, moved)
+        playlistOrders[playlist] = order
+        save()
     }
 
     fun updateMetadata(id: String, title: String, artist: String) = update(id) {
@@ -1354,6 +1766,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             currentTrack = null
         }
         tracks.removeAll { it.id == track.id }
+        playlistOrders.keys.toList().forEach { playlist ->
+            playlistOrders[playlist] = playlistOrders[playlist].orEmpty() - track.id
+        }
         if (track.path.startsWith(app.filesDir.absolutePath) ||
             track.path.startsWith(downloadDir.absolutePath)
         ) {
@@ -1365,7 +1780,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun visibleTracks(mode: LibraryMode): List<AudioTrack> {
         val query = search.trim()
-        return tracks.filter { track ->
+        val filtered = tracks.filter { track ->
             val sectionMatch = when (mode) {
                 LibraryMode.ALL -> true
                 LibraryMode.FAVORITES -> track.favorite
@@ -1376,19 +1791,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 track.artist.contains(query, ignoreCase = true)
             sectionMatch && searchMatch
         }
+        return if (mode == LibraryMode.PLAYLIST && selectedPlaylist != null) {
+            val order = playlistOrders[selectedPlaylist].orEmpty()
+            val positions = order.withIndex().associate { it.value to it.index }
+            filtered.sortedBy { positions[it.id] ?: Int.MAX_VALUE }
+        } else {
+            filtered
+        }
     }
 
-    private suspend fun addFile(file: File, playlistName: String? = null) {
-        if (!file.exists()) return
+    private suspend fun addFile(
+        file: File,
+        playlistName: String? = null,
+        coverPath: String? = null
+    ): AudioTrack? {
+        if (!file.exists()) return null
         val metadata = metadata(file)
         val track = AudioTrack(
             id = UUID.randomUUID().toString(),
             title = metadata.first.ifBlank { file.nameWithoutExtension },
             artist = metadata.second.ifBlank { "Unbekannter Interpret" },
             path = file.absolutePath,
+            coverPath = coverPath,
             playlists = playlistName?.let(::setOf).orEmpty()
         )
-        withContext(Dispatchers.Main) {
+        return withContext(Dispatchers.Main) {
             val existingIndex = tracks.indexOfFirst { it.path == file.absolutePath }
             if (existingIndex < 0) {
                 val assignments = pendingSpotifyTracks.filter {
@@ -1399,14 +1826,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 pendingSpotifyTracks.removeAll(assignments.toSet())
                 tracks.add(assignedTrack)
+                assignedTrack.playlists.forEach { ensurePlaylistOrder(it, assignedTrack.id) }
                 save()
+                assignedTrack
             } else if (playlistName != null &&
                 playlistName !in tracks[existingIndex].playlists
             ) {
                 tracks[existingIndex] = tracks[existingIndex].copy(
+                    coverPath = tracks[existingIndex].coverPath ?: coverPath,
                     playlists = tracks[existingIndex].playlists + playlistName
                 )
+                ensurePlaylistOrder(playlistName, tracks[existingIndex].id)
                 save()
+                tracks[existingIndex]
+            } else {
+                if (coverPath != null && tracks[existingIndex].coverPath == null) {
+                    tracks[existingIndex] = tracks[existingIndex].copy(coverPath = coverPath)
+                    save()
+                }
+                tracks[existingIndex]
             }
         }
     }
@@ -1432,6 +1870,159 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             downloadDir.walkTopDown()
                 .filter { it.isFile && it.extension.equals("mp3", true) }
                 .forEach { addFile(it) }
+        }
+    }
+
+    private fun orderedPlaylistTracks(name: String): List<AudioTrack> {
+        val members = tracks.filter { name in it.playlists }
+        val storedOrder = playlistOrders[name].orEmpty()
+        val positions = storedOrder.withIndex().associate { it.value to it.index }
+        return members.sortedBy { positions[it.id] ?: Int.MAX_VALUE }
+    }
+
+    private fun ensurePlaylistOrder(name: String, trackId: String) {
+        val current = playlistOrders[name].orEmpty()
+        if (trackId !in current) playlistOrders[name] = current + trackId
+    }
+
+    private fun recordPlay(track: AudioTrack) {
+        playCounts[track.id] = (playCounts[track.id] ?: 0) + 1
+        playbackHistory.add(
+            0,
+            PlaybackHistoryEntry(
+                trackId = track.id,
+                title = track.title,
+                artist = track.artist,
+                playedAt = System.currentTimeMillis()
+            )
+        )
+        while (playbackHistory.size > 500) playbackHistory.removeAt(playbackHistory.lastIndex)
+        saveStats()
+    }
+
+    private fun updateListeningSession(nowPlaying: Boolean) {
+        val now = SystemClock.elapsedRealtime()
+        if (nowPlaying) {
+            if (activeListeningStartedAt == 0L) activeListeningStartedAt = now
+        } else if (activeListeningStartedAt > 0L) {
+            totalListeningMs += (now - activeListeningStartedAt).coerceAtLeast(0L)
+            activeListeningStartedAt = 0L
+            prefs.edit().putLong("total_listening_ms", totalListeningMs).apply()
+        }
+    }
+
+    private fun currentListeningTotal(): Long = totalListeningMs +
+        if (activeListeningStartedAt > 0L) {
+            (SystemClock.elapsedRealtime() - activeListeningStartedAt).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+
+    private fun saveStats() {
+        prefs.edit()
+            .putString(
+                "play_counts",
+                JSONObject().apply {
+                    playCounts.forEach { (trackId, count) -> put(trackId, count) }
+                }.toString()
+            )
+            .putString(
+                "playback_history",
+                JSONArray().apply {
+                    playbackHistory.forEach { entry ->
+                        put(JSONObject().apply {
+                            put("trackId", entry.trackId)
+                            put("title", entry.title)
+                            put("artist", entry.artist)
+                            put("playedAt", entry.playedAt)
+                        })
+                    }
+                }.toString()
+            )
+            .apply()
+    }
+
+    private fun mergeImportedBackup(imported: KochifyBackupImport): String {
+        imported.playlists.forEach { playlist ->
+            if (playlist !in playlists) playlists.add(playlist)
+            if (playlist !in playlistOrders) playlistOrders[playlist] = emptyList()
+        }
+        imported.playlistCovers.forEach { (name, path) ->
+            if (playlistCovers[name].isNullOrBlank()) {
+                playlistCovers[name] = path
+            } else {
+                File(path).delete()
+            }
+        }
+        var restoredTracks = 0
+        var matchedTracks = 0
+        var missingTracks = 0
+        imported.tracks.forEach { backupTrack ->
+            val existingIndex = tracks.indexOfFirst {
+                spotifyMatches(
+                    it.title,
+                    it.artist,
+                    backupTrack.title,
+                    backupTrack.artist
+                )
+            }
+            val resultingTrack = if (existingIndex >= 0) {
+                val existing = tracks[existingIndex]
+                val updated = existing.copy(
+                    favorite = existing.favorite || backupTrack.favorite,
+                    playlists = existing.playlists + backupTrack.playlists,
+                    coverPath = backupTrack.coverPath ?: existing.coverPath
+                )
+                tracks[existingIndex] = updated
+                if (currentTrack?.id == updated.id) currentTrack = updated
+                backupTrack.audioPath?.let { File(it).delete() }
+                matchedTracks++
+                updated
+            } else if (backupTrack.audioPath != null) {
+                val restored = AudioTrack(
+                    id = UUID.randomUUID().toString(),
+                    title = backupTrack.title,
+                    artist = backupTrack.artist,
+                    path = backupTrack.audioPath,
+                    coverPath = backupTrack.coverPath,
+                    favorite = backupTrack.favorite,
+                    playlists = backupTrack.playlists
+                )
+                tracks.add(restored)
+                restoredTracks++
+                restored
+            } else {
+                backupTrack.coverPath?.let { File(it).delete() }
+                missingTracks++
+                null
+            }
+            resultingTrack?.playlists?.forEach { playlist ->
+                ensurePlaylistOrder(playlist, resultingTrack.id)
+            }
+        }
+
+        if (imported.includeSettings) {
+            themeMode = imported.themeMode
+            shuffleEnabled = imported.shuffleEnabled
+            repeatOneEnabled = imported.repeatOneEnabled
+            player.repeatMode = if (repeatOneEnabled) {
+                Player.REPEAT_MODE_ONE
+            } else {
+                Player.REPEAT_MODE_OFF
+            }
+            prefs.edit()
+                .putString("theme_mode", themeMode.name)
+                .putBoolean("shuffle_enabled", shuffleEnabled)
+                .putBoolean("repeat_one_enabled", repeatOneEnabled)
+                .apply()
+        }
+        save()
+        return buildString {
+            append("Import abgeschlossen: ${imported.playlists.size} Playlists")
+            if (restoredTracks > 0) append(", $restoredTracks Songs wiederhergestellt")
+            if (matchedTracks > 0) append(", $matchedTracks vorhandene Songs zugeordnet")
+            if (missingTracks > 0) append(", $missingTracks Songs ohne Datei übersprungen")
+            append(".")
         }
     }
 
@@ -1473,6 +2064,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val storedPlaylists = JSONArray(prefs.getString("playlists", "[]"))
             repeat(storedPlaylists.length()) { playlists.add(storedPlaylists.getString(it)) }
 
+            val storedPlaylistCovers = JSONObject(
+                prefs.getString("playlist_covers", "{}").orEmpty().ifBlank { "{}" }
+            )
+            val coverNames = storedPlaylistCovers.keys()
+            while (coverNames.hasNext()) {
+                val name = coverNames.next()
+                storedPlaylistCovers.optString(name)
+                    .takeIf { it.isNotBlank() && File(it).isFile }
+                    ?.let { playlistCovers[name] = it }
+            }
+
+            val storedPlaylistOrders = JSONObject(
+                prefs.getString("playlist_orders", "{}").orEmpty().ifBlank { "{}" }
+            )
+            val orderNames = storedPlaylistOrders.keys()
+            while (orderNames.hasNext()) {
+                val name = orderNames.next()
+                val order = storedPlaylistOrders.optJSONArray(name) ?: JSONArray()
+                playlistOrders[name] = buildList {
+                    repeat(order.length()) { index ->
+                        order.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                }
+            }
+
             val pending = JSONArray(prefs.getString("spotify_pending_tracks", "[]"))
             repeat(pending.length()) { index ->
                 val item = pending.getJSONObject(index)
@@ -1495,6 +2111,37 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     .takeIf { it.isNotBlank() }
                     ?.let { spotifyPlaylistLinks[name] = it }
             }
+
+            val storedPlayCounts = JSONObject(
+                prefs.getString("play_counts", "{}").orEmpty().ifBlank { "{}" }
+            )
+            val countedTrackIds = storedPlayCounts.keys()
+            while (countedTrackIds.hasNext()) {
+                val trackId = countedTrackIds.next()
+                val count = storedPlayCounts.optInt(trackId)
+                if (count > 0) playCounts[trackId] = count
+            }
+
+            val storedHistory = JSONArray(prefs.getString("playback_history", "[]"))
+            repeat(minOf(storedHistory.length(), 500)) { index ->
+                val item = storedHistory.optJSONObject(index) ?: return@repeat
+                playbackHistory.add(
+                    PlaybackHistoryEntry(
+                        trackId = item.optString("trackId"),
+                        title = item.optString("title").ifBlank { "Unbekannter Titel" },
+                        artist = item.optString("artist").ifBlank {
+                            "Unbekannter Interpret"
+                        },
+                        playedAt = item.optLong("playedAt")
+                    )
+                )
+            }
+
+            playlists.forEach { playlist ->
+                val existingIds = tracks.filter { playlist in it.playlists }.map { it.id }
+                val stored = playlistOrders[playlist].orEmpty().filter { it in existingIds }
+                playlistOrders[playlist] = stored + existingIds.filter { it !in stored }
+            }
         }
     }
 
@@ -1514,6 +2161,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit()
             .putString("tracks", array.toString())
             .putString("playlists", JSONArray(playlists.toList()).toString())
+            .putString(
+                "playlist_covers",
+                JSONObject().apply {
+                    playlistCovers.forEach { (name, path) -> put(name, path) }
+                }.toString()
+            )
+            .putString(
+                "playlist_orders",
+                JSONObject().apply {
+                    playlistOrders.forEach { (name, order) ->
+                        put(name, JSONArray(order))
+                    }
+                }.toString()
+            )
             .putString(
                 "spotify_pending_tracks",
                 JSONArray().apply {
@@ -1536,6 +2197,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        updateListeningSession(false)
+        closeLocalTransfer()
         PlaybackCommandBridge.unregister()
         player.release()
         PlaybackKeepAliveService.stop(app)

@@ -3,6 +3,7 @@ package de.kochify.music
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
@@ -43,6 +44,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
@@ -57,9 +61,12 @@ import androidx.compose.material.icons.filled.NavigateNext
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -104,11 +111,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.MultiFormatWriter
+import java.text.DateFormat
+import java.util.Date
 
 private val KochifyGreen = Color(0xFF1ED760)
 private val DarkBackground = Color(0xFF0A0A0A)
@@ -219,6 +234,8 @@ private fun MusicApp(vm: MusicViewModel) {
     var showSpotifyImport by remember { mutableStateOf(false) }
     var showThemePicker by remember { mutableStateOf(false) }
     var showBackup by remember { mutableStateOf(false) }
+    var showStats by remember { mutableStateOf(false) }
+    var showLocalTransfer by remember { mutableStateOf(false) }
     var backupIncludesMusic by remember { mutableStateOf(true) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var showNowPlaying by remember { mutableStateOf(false) }
@@ -226,6 +243,16 @@ private fun MusicApp(vm: MusicViewModel) {
     var playlistTrack by remember { mutableStateOf<AudioTrack?>(null) }
     var renamingPlaylist by remember { mutableStateOf<String?>(null) }
     var deletingPlaylist by remember { mutableStateOf<String?>(null) }
+    var coveringPlaylist by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+    val qrScanner = remember {
+        val options = GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .build()
+        GmsBarcodeScanning.getClient(context, options)
+    }
 
     val audioPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents()
@@ -240,10 +267,26 @@ private fun MusicApp(vm: MusicViewModel) {
     ) { uri ->
         uri?.let(vm::importKochifyBackup)
     }
+    val playlistCoverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        val playlist = coveringPlaylist
+        if (uri != null && playlist != null) vm.setPlaylistCover(playlist, uri)
+        coveringPlaylist = null
+    }
+    val scanTransferQr: () -> Unit = {
+        showLocalTransfer = true
+        qrScanner.startScan()
+            .addOnSuccessListener { barcode ->
+                barcode.rawValue?.let(vm::receiveLocalTransfer)
+            }
+        Unit
+    }
 
     val activeTrack = vm.currentTrack
     val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
-        showBackup || showNewPlaylist || editingTrack != null || playlistTrack != null ||
+        showBackup || showStats || showLocalTransfer || showNewPlaylist ||
+        editingTrack != null || playlistTrack != null ||
         renamingPlaylist != null || deletingPlaylist != null
     BackHandler(
         enabled = !hasOpenDialog &&
@@ -343,6 +386,10 @@ private fun MusicApp(vm: MusicViewModel) {
                     onImport = { audioPicker.launch("audio/*") },
                     onDownload = { showDownload = true },
                     onSpotifyImport = { showSpotifyImport = true },
+                    onStats = { showStats = true },
+                    onLocalTransfer = {
+                        showLocalTransfer = true
+                    },
                     onSharePlaylist = vm::sharePlaylist,
                     onNewPlaylist = { showNewPlaylist = true }
                 )
@@ -356,6 +403,15 @@ private fun MusicApp(vm: MusicViewModel) {
                         spotifyUrlFor = vm::spotifyPlaylistUrl,
                         onOpenSpotify = vm::openSpotifyPlaylist,
                         onShare = vm::sharePlaylist,
+                        coverFor = vm::playlistCover,
+                        onCover = { playlist ->
+                            coveringPlaylist = playlist
+                            playlistCoverPicker.launch("image/*")
+                        },
+                        onLocalTransfer = { playlist ->
+                            showLocalTransfer = true
+                            vm.startPlaylistLocalTransfer(playlist)
+                        },
                         onRename = { renamingPlaylist = it },
                         onDelete = { deletingPlaylist = it }
                     )
@@ -365,7 +421,12 @@ private fun MusicApp(vm: MusicViewModel) {
                         vm = vm,
                         onOpenPlayer = { showNowPlaying = true },
                         onEdit = { editingTrack = it },
-                        onPlaylist = { playlistTrack = it }
+                        onPlaylist = { playlistTrack = it },
+                        playlistName = vm.selectedPlaylist,
+                        onLocalTransfer = { track ->
+                            showLocalTransfer = true
+                            vm.startTrackLocalTransfer(track)
+                        }
                     )
                 }
             }
@@ -420,6 +481,22 @@ private fun MusicApp(vm: MusicViewModel) {
                 )
             },
             onDismiss = { if (!vm.isBackupBusy) showBackup = false }
+        )
+    }
+    if (showStats) {
+        StatsDialog(
+            stats = vm.playbackStats(),
+            onDismiss = { showStats = false }
+        )
+    }
+    if (showLocalTransfer) {
+        LocalTransferDialog(
+            vm = vm,
+            onScan = scanTransferQr,
+            onDismiss = {
+                vm.closeLocalTransfer()
+                showLocalTransfer = false
+            }
         )
     }
     if (showNewPlaylist) {
@@ -483,9 +560,12 @@ private fun Header(
     onImport: () -> Unit,
     onDownload: () -> Unit,
     onSpotifyImport: () -> Unit,
+    onStats: () -> Unit,
+    onLocalTransfer: () -> Unit,
     onSharePlaylist: (String) -> Unit,
     onNewPlaylist: () -> Unit
 ) {
+    var toolsExpanded by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -535,15 +615,42 @@ private fun Header(
                     tint = MaterialTheme.colorScheme.primary
                 )
             }
-            IconButton(onClick = onSpotifyImport) {
-                Icon(
-                    Icons.Default.Sync,
-                    "Spotify-Playlists importieren",
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
             IconButton(onClick = onNewPlaylist) {
                 Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
+            }
+            Box {
+                IconButton(onClick = { toolsExpanded = true }) {
+                    Icon(Icons.Default.MoreVert, "Weitere Funktionen")
+                }
+                androidx.compose.material3.DropdownMenu(
+                    expanded = toolsExpanded,
+                    onDismissRequest = { toolsExpanded = false }
+                ) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Spotify-Playlists importieren") },
+                        leadingIcon = { Icon(Icons.Default.Sync, null) },
+                        onClick = {
+                            toolsExpanded = false
+                            onSpotifyImport()
+                        }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Verlauf und Statistiken") },
+                        leadingIcon = { Icon(Icons.Default.BarChart, null) },
+                        onClick = {
+                            toolsExpanded = false
+                            onStats()
+                        }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Lokale QR-Übertragung") },
+                        leadingIcon = { Icon(Icons.Default.QrCodeScanner, null) },
+                        onClick = {
+                            toolsExpanded = false
+                            onLocalTransfer()
+                        }
+                    )
+                }
             }
         }
     }
@@ -570,7 +677,9 @@ private fun TrackList(
     vm: MusicViewModel,
     onOpenPlayer: () -> Unit,
     onEdit: (AudioTrack) -> Unit,
-    onPlaylist: (AudioTrack) -> Unit
+    onPlaylist: (AudioTrack) -> Unit,
+    playlistName: String?,
+    onLocalTransfer: (AudioTrack) -> Unit
 ) {
     if (tracks.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -605,6 +714,13 @@ private fun TrackList(
                 onEdit = { onEdit(track) },
                 onPlaylist = { onPlaylist(track) },
                 onShare = { vm.shareTrack(track) },
+                onLocalTransfer = { onLocalTransfer(track) },
+                onMoveUp = playlistName?.let {
+                    { vm.moveTrackInPlaylist(it, track.id, -1) }
+                },
+                onMoveDown = playlistName?.let {
+                    { vm.moveTrackInPlaylist(it, track.id, 1) }
+                },
                 onDelete = { vm.deleteTrack(track) }
             )
         }
@@ -620,6 +736,9 @@ private fun TrackRow(
     onEdit: () -> Unit,
     onPlaylist: () -> Unit,
     onShare: () -> Unit,
+    onLocalTransfer: () -> Unit,
+    onMoveUp: (() -> Unit)?,
+    onMoveDown: (() -> Unit)?,
     onDelete: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -687,6 +806,25 @@ private fun TrackRow(
                     onClick = { expanded = false; onShare() }
                 )
                 androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Per QR direkt übertragen") },
+                    leadingIcon = { Icon(Icons.Default.QrCode2, null) },
+                    onClick = { expanded = false; onLocalTransfer() }
+                )
+                if (onMoveUp != null) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("In Playlist nach oben") },
+                        leadingIcon = { Icon(Icons.Default.ArrowUpward, null) },
+                        onClick = { expanded = false; onMoveUp() }
+                    )
+                }
+                if (onMoveDown != null) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("In Playlist nach unten") },
+                        leadingIcon = { Icon(Icons.Default.ArrowDownward, null) },
+                        onClick = { expanded = false; onMoveDown() }
+                    )
+                }
+                androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Aus der App löschen") },
                     leadingIcon = { Icon(Icons.Default.Delete, null) },
                     onClick = { expanded = false; onDelete() }
@@ -704,6 +842,9 @@ private fun PlaylistList(
     spotifyUrlFor: (String) -> String?,
     onOpenSpotify: (String) -> Unit,
     onShare: (String) -> Unit,
+    coverFor: (String) -> String?,
+    onCover: (String) -> Unit,
+    onLocalTransfer: (String) -> Unit,
     onRename: (String) -> Unit,
     onDelete: (String) -> Unit
 ) {
@@ -734,21 +875,7 @@ private fun PlaylistList(
                     .padding(vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    Modifier
-                        .size(58.dp)
-                        .background(
-                            MaterialTheme.colorScheme.surfaceVariant,
-                            RoundedCornerShape(8.dp)
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.QueueMusic,
-                        null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
+                Cover(coverFor(playlist), 58)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(playlist, fontWeight = FontWeight.Bold, fontSize = 17.sp)
@@ -783,6 +910,22 @@ private fun PlaylistList(
                             onClick = {
                                 expanded = false
                                 onShare(playlist)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Per QR direkt übertragen") },
+                            leadingIcon = { Icon(Icons.Default.QrCode2, null) },
+                            onClick = {
+                                expanded = false
+                                onLocalTransfer(playlist)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Playlist-Cover ändern") },
+                            leadingIcon = { Icon(Icons.Default.Photo, null) },
+                            onClick = {
+                                expanded = false
+                                onCover(playlist)
                             }
                         )
                         androidx.compose.material3.DropdownMenuItem(
@@ -1285,6 +1428,212 @@ private fun BackupDialog(
 }
 
 @Composable
+private fun StatsDialog(
+    stats: PlaybackStats,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Verlauf & Statistiken") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "${formatListeningTime(stats.totalListeningMs)} gehört",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Black,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    "${stats.totalPlays} Wiedergaben · ${stats.uniqueTracks} verschiedene Songs",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (stats.mostPlayed.isNotEmpty()) {
+                    Spacer(Modifier.height(18.dp))
+                    Text("Am häufigsten gehört", fontWeight = FontWeight.Bold)
+                    stats.mostPlayed.forEachIndexed { index, (track, count) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("${index + 1}.", modifier = Modifier.width(28.dp))
+                            Cover(track.coverPath, 42)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    track.title,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    track.artist,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text("${count}×", color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+                Text("Zuletzt gehört", fontWeight = FontWeight.Bold)
+                if (stats.recent.isEmpty()) {
+                    Text(
+                        "Noch kein Wiedergabeverlauf vorhanden.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                } else {
+                    stats.recent.take(15).forEach { entry ->
+                        Column(Modifier.padding(vertical = 7.dp)) {
+                            Text(
+                                entry.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                "${entry.artist} · ${formatHistoryDate(entry.playedAt)}",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("Schließen") }
+        }
+    )
+}
+
+@Composable
+private fun LocalTransferDialog(
+    vm: MusicViewModel,
+    onScan: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val offer = vm.localTransferOffer
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Lokale QR-Übertragung") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                if (offer != null) {
+                    Text(
+                        offer.title,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    val qr = remember(offer.qrPayload) { createQrBitmap(offer.qrPayload) }
+                    Surface(color = Color.White, shape = RoundedCornerShape(12.dp)) {
+                        Image(
+                            bitmap = qr.asImageBitmap(),
+                            contentDescription = "Kochify Übertragungs-QR-Code",
+                            modifier = Modifier
+                                .size(250.dp)
+                                .padding(8.dp)
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                } else {
+                    Icon(
+                        Icons.Default.QrCodeScanner,
+                        null,
+                        modifier = Modifier.size(54.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Scanne den Code des anderen Kochify-Handys. Beide Geräte müssen " +
+                            "im selben WLAN sein.",
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (vm.isLocalTransferBusy) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 14.dp)
+                    )
+                }
+                vm.localTransferStatus?.let { status ->
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        status,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
+                }
+                if (offer == null) {
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onScan,
+                        enabled = !vm.isLocalTransferBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.QrCodeScanner, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("QR-Code scannen")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Schließen") }
+        }
+    )
+}
+
+private fun createQrBitmap(value: String): Bitmap {
+    val size = 700
+    val matrix = MultiFormatWriter().encode(value, BarcodeFormat.QR_CODE, size, size)
+    val pixels = IntArray(size * size)
+    repeat(size) { y ->
+        repeat(size) { x ->
+            pixels[y * size + x] = if (matrix[x, y]) {
+                android.graphics.Color.BLACK
+            } else {
+                android.graphics.Color.WHITE
+            }
+        }
+    }
+    return Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).apply {
+        setPixels(pixels, 0, size, 0, 0, size, size)
+    }
+}
+
+private fun formatListeningTime(milliseconds: Long): String {
+    val totalMinutes = (milliseconds / 60_000L).coerceAtLeast(0L)
+    val hours = totalMinutes / 60L
+    val minutes = totalMinutes % 60L
+    return if (hours > 0L) "$hours Std. $minutes Min." else "$minutes Min."
+}
+
+private fun formatHistoryDate(timestamp: Long): String = runCatching {
+    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(timestamp))
+}.getOrDefault("–")
+
+@Composable
 private fun ThemePickerDialog(
     selected: KochifyThemeMode,
     onSelect: (KochifyThemeMode) -> Unit,
@@ -1373,10 +1722,11 @@ private fun DownloadDialog(
     progress: Float,
     status: String?,
     onDismiss: () -> Unit,
-    onDownload: (String) -> Unit
+    onDownload: (String, Boolean) -> Unit
 ) {
     var url by remember { mutableStateOf("") }
     var confirmed by remember { mutableStateOf(false) }
+    var useYoutubeCovers by remember { mutableStateOf(true) }
     val looksLikePlaylist = url.contains("list=", ignoreCase = true) ||
         url.contains("/playlist", ignoreCase = true)
     AlertDialog(
@@ -1411,6 +1761,14 @@ private fun DownloadDialog(
                     )
                     Text("Ich besitze die nötigen Rechte.")
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = useYoutubeCovers,
+                        onCheckedChange = { useYoutubeCovers = it },
+                        enabled = !downloading
+                    )
+                    Text("YouTube-Thumbnails als Cover übernehmen")
+                }
                 if (downloading) {
                     LinearProgressIndicator(
                         progress = { progress },
@@ -1435,7 +1793,7 @@ private fun DownloadDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onDownload(url) },
+                onClick = { onDownload(url, useYoutubeCovers) },
                 enabled = confirmed && url.isNotBlank() && !downloading
             ) {
                 if (downloading) {

@@ -24,6 +24,7 @@ internal data class BackupTrack(
 
 internal data class KochifyBackupImport(
     val playlists: List<String>,
+    val playlistCovers: Map<String, String>,
     val tracks: List<BackupTrack>,
     val themeMode: KochifyThemeMode,
     val shuffleEnabled: Boolean,
@@ -34,7 +35,7 @@ internal data class KochifyBackupImport(
 
 internal object KochifyBackupManager {
     private const val FORMAT = "kochify-backup"
-    private const val BACKUP_VERSION = 1
+    private const val BACKUP_VERSION = 2
     private const val MANIFEST_ENTRY = "backup.json"
 
     fun export(
@@ -42,6 +43,7 @@ internal object KochifyBackupManager {
         uri: Uri,
         tracks: List<AudioTrack>,
         playlists: List<String>,
+        playlistCovers: Map<String, String> = emptyMap(),
         themeMode: KochifyThemeMode,
         shuffleEnabled: Boolean,
         repeatOneEnabled: Boolean,
@@ -61,6 +63,11 @@ internal object KochifyBackupManager {
             }
             Triple(track, audioEntry to audioFile, coverEntry to coverFile)
         }
+        val preparedPlaylistCovers = playlistCovers.mapNotNull { (name, path) ->
+            val file = File(path).takeIf { it.isFile } ?: return@mapNotNull null
+            val entry = "playlist-covers/${UUID.randomUUID()}.${safeExtension(file, "jpg")}" 
+            Triple(name, entry, file)
+        }
 
         val manifest = JSONObject().apply {
             put("format", FORMAT)
@@ -72,6 +79,9 @@ internal object KochifyBackupManager {
             put("shuffleEnabled", shuffleEnabled)
             put("repeatOneEnabled", repeatOneEnabled)
             put("playlists", JSONArray(playlists))
+            put("playlistCovers", JSONObject().apply {
+                preparedPlaylistCovers.forEach { (name, entry, _) -> put(name, entry) }
+            })
             put("tracks", JSONArray().apply {
                 preparedTracks.forEach { (track, audio, cover) ->
                     put(JSONObject().apply {
@@ -102,6 +112,9 @@ internal object KochifyBackupManager {
                     cover.second?.let { file -> addFile(zip, name, file) }
                 }
             }
+            preparedPlaylistCovers.forEach { (_, entry, file) ->
+                addFile(zip, entry, file)
+            }
         }
         return preparedTracks.count { it.second.second != null }
     }
@@ -125,7 +138,8 @@ internal object KochifyBackupManager {
                             }
                             manifestText = bytes.toString(Charsets.UTF_8)
                         } else if (cleanName.startsWith("music/") ||
-                            cleanName.startsWith("covers/")
+                            cleanName.startsWith("covers/") ||
+                            cleanName.startsWith("playlist-covers/")
                         ) {
                             val target = safeTarget(tempRoot, cleanName)
                             target.parentFile?.mkdirs()
@@ -207,11 +221,32 @@ internal object KochifyBackupManager {
                         ?.let(::add)
                 }
             }
+            val restoredPlaylistCovers = buildMap {
+                val entries = root.optJSONObject("playlistCovers") ?: JSONObject()
+                val names = entries.keys()
+                while (names.hasNext()) {
+                    val name = names.next()
+                    val entry = safeEntryName(entries.optString(name))
+                        ?.takeIf { it.startsWith("playlist-covers/") }
+                    val source = entry
+                        ?.let { safeTarget(tempRoot, it) }
+                        ?.takeIf { it.isFile }
+                        ?: continue
+                    val extension = safeExtension(source, "jpg")
+                    val target = File(
+                        restoredCoversDir,
+                        "playlist-${UUID.randomUUID()}.$extension"
+                    )
+                    source.copyTo(target, overwrite = true)
+                    put(name, target.absolutePath)
+                }
+            }
             val restoredTheme = runCatching {
                 KochifyThemeMode.valueOf(root.optString("themeMode"))
             }.getOrDefault(KochifyThemeMode.BLACK)
             return KochifyBackupImport(
                 playlists = restoredPlaylists,
+                playlistCovers = restoredPlaylistCovers,
                 tracks = restoredTracks,
                 themeMode = restoredTheme,
                 shuffleEnabled = root.optBoolean("shuffleEnabled"),
