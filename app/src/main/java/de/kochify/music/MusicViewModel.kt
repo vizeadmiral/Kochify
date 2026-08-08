@@ -1778,6 +1778,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         save()
     }
 
+    fun setPlaylistOrder(playlist: String, orderedTrackIds: List<String>) {
+        val memberIds = tracks
+            .filter { playlist in it.playlists }
+            .map { it.id }
+        val validIds = orderedTrackIds
+            .filter { it in memberIds }
+            .distinct()
+        playlistOrders[playlist] = validIds + memberIds.filter { it !in validIds }
+        save()
+        Toast.makeText(app, "Playlist-Reihenfolge gespeichert.", Toast.LENGTH_SHORT).show()
+    }
+
+    fun playlistTracks(name: String): List<AudioTrack> = orderedPlaylistTracks(name)
+
     fun updateMetadata(id: String, title: String, artist: String) = update(id) {
         it.copy(
             title = title.trim().ifEmpty { it.title },
@@ -2017,11 +2031,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (playlist !in playlistOrders) playlistOrders[playlist] = emptyList()
         }
         imported.playlistCovers.forEach { (name, path) ->
-            if (playlistCovers[name].isNullOrBlank()) {
-                playlistCovers[name] = path
-            } else {
-                File(path).delete()
-            }
+            playlistCovers[name] = path
         }
         var restoredTracks = 0
         var matchedTracks = 0
@@ -2091,6 +2101,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (restoredTracks > 0) append(", $restoredTracks Songs wiederhergestellt")
             if (matchedTracks > 0) append(", $matchedTracks vorhandene Songs zugeordnet")
             if (missingTracks > 0) append(", $missingTracks Songs ohne Datei übersprungen")
+            if (imported.restoredSongCovers > 0) {
+                append(", ${imported.restoredSongCovers} Songbilder")
+            }
+            if (imported.restoredPlaylistCovers > 0) {
+                append(", ${imported.restoredPlaylistCovers} Playlistbilder")
+            }
             append(".")
         }
     }

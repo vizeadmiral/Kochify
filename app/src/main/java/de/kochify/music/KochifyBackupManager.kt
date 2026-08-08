@@ -1,6 +1,7 @@
 package de.kochify.music
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
@@ -30,12 +31,14 @@ internal data class KochifyBackupImport(
     val shuffleEnabled: Boolean,
     val repeatOneEnabled: Boolean,
     val restoredAudioFiles: Int,
+    val restoredSongCovers: Int,
+    val restoredPlaylistCovers: Int,
     val includeSettings: Boolean
 )
 
 internal object KochifyBackupManager {
     private const val FORMAT = "kochify-backup"
-    private const val BACKUP_VERSION = 2
+    private const val BACKUP_VERSION = 3
     private const val MANIFEST_ENTRY = "backup.json"
 
     fun export(
@@ -63,7 +66,12 @@ internal object KochifyBackupManager {
             }
             Triple(track, audioEntry to audioFile, coverEntry to coverFile)
         }
-        val preparedPlaylistCovers = playlistCovers.mapNotNull { (name, path) ->
+        val preparedPlaylistCovers = playlists.mapNotNull { name ->
+            val path = playlistCovers[name]
+                ?: tracks.firstNotNullOfOrNull { track ->
+                    track.coverPath?.takeIf { name in track.playlists }
+                }
+                ?: return@mapNotNull null
             val file = File(path).takeIf { it.isFile } ?: return@mapNotNull null
             val entry = "playlist-covers/${UUID.randomUUID()}.${safeExtension(file, "jpg")}" 
             Triple(name, entry, file)
@@ -162,6 +170,8 @@ internal object KochifyBackupManager {
             val restoredMusicDir = File(context.filesDir, "music").apply { mkdirs() }
             val restoredCoversDir = File(context.filesDir, "covers").apply { mkdirs() }
             var restoredAudioFiles = 0
+            var restoredSongCovers = 0
+            var restoredPlaylistCoverCount = 0
             val restoredTracks = mutableListOf<BackupTrack>()
             val trackArray = root.optJSONArray("tracks") ?: JSONArray()
             repeat(trackArray.length()) { index ->
@@ -185,12 +195,19 @@ internal object KochifyBackupManager {
                         restoredAudioFiles++
                     }
                 }
-                val coverTarget = coverSource?.let { source ->
+                val explicitCoverTarget = coverSource?.let { source ->
                     val extension = safeExtension(source, "jpg")
                     File(restoredCoversDir, "$restoredId.$extension").also { target ->
                         source.copyTo(target, overwrite = true)
                     }
                 }
+                val coverTarget = explicitCoverTarget ?: audioTarget?.let { audio ->
+                    extractEmbeddedCover(
+                        audio,
+                        File(restoredCoversDir, "$restoredId-embedded.jpg")
+                    )
+                }
+                if (coverTarget != null) restoredSongCovers++
                 val itemPlaylists = buildSet {
                     val array = item.optJSONArray("playlists") ?: JSONArray()
                     repeat(array.length()) { playlistIndex ->
@@ -221,7 +238,7 @@ internal object KochifyBackupManager {
                         ?.let(::add)
                 }
             }
-            val restoredPlaylistCovers = buildMap {
+            val restoredPlaylistCovers = buildMap<String, String> {
                 val entries = root.optJSONObject("playlistCovers") ?: JSONObject()
                 val names = entries.keys()
                 while (names.hasNext()) {
@@ -239,6 +256,23 @@ internal object KochifyBackupManager {
                     )
                     source.copyTo(target, overwrite = true)
                     put(name, target.absolutePath)
+                    restoredPlaylistCoverCount++
+                }
+                restoredPlaylists.forEach { playlist ->
+                    if (playlist in this) return@forEach
+                    val source = restoredTracks.firstNotNullOfOrNull { track ->
+                        track.coverPath
+                            ?.takeIf { playlist in track.playlists }
+                            ?.let(::File)
+                            ?.takeIf { it.isFile }
+                    } ?: return@forEach
+                    val target = File(
+                        restoredCoversDir,
+                        "playlist-${UUID.randomUUID()}.${safeExtension(source, "jpg")}" 
+                    )
+                    source.copyTo(target, overwrite = true)
+                    put(playlist, target.absolutePath)
+                    restoredPlaylistCoverCount++
                 }
             }
             val restoredTheme = runCatching {
@@ -252,6 +286,8 @@ internal object KochifyBackupManager {
                 shuffleEnabled = root.optBoolean("shuffleEnabled"),
                 repeatOneEnabled = root.optBoolean("repeatOneEnabled"),
                 restoredAudioFiles = restoredAudioFiles,
+                restoredSongCovers = restoredSongCovers,
+                restoredPlaylistCovers = restoredPlaylistCoverCount,
                 includeSettings = root.optBoolean("includeSettings", true)
             )
         } finally {
@@ -264,6 +300,19 @@ internal object KochifyBackupManager {
         file.inputStream().use { it.copyTo(zip) }
         zip.closeEntry()
     }
+
+    private fun extractEmbeddedCover(audioFile: File, target: File): File? = runCatching {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(audioFile.absolutePath)
+            val bytes = retriever.embeddedPicture ?: return@runCatching null
+            require(bytes.isNotEmpty() && bytes.size <= 12 * 1024 * 1024)
+            target.writeBytes(bytes)
+            target
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }.getOrNull()
 
     private fun safeExtension(file: File, fallback: String): String = file.extension
         .lowercase()

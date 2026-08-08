@@ -22,6 +22,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -37,6 +38,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -49,6 +51,7 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -100,16 +103,20 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -117,6 +124,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -245,6 +253,7 @@ private fun MusicApp(vm: MusicViewModel) {
     var renamingPlaylist by remember { mutableStateOf<String?>(null) }
     var deletingPlaylist by remember { mutableStateOf<String?>(null) }
     var coveringPlaylist by remember { mutableStateOf<String?>(null) }
+    var editingPlaylistOrder by remember { mutableStateOf<String?>(null) }
 
     val context = LocalContext.current
     val qrScanner = remember {
@@ -288,7 +297,8 @@ private fun MusicApp(vm: MusicViewModel) {
     val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
         showBackup || showStats || showLocalTransfer || showBulkCover || showNewPlaylist ||
         editingTrack != null || playlistTrack != null ||
-        renamingPlaylist != null || deletingPlaylist != null
+        renamingPlaylist != null || deletingPlaylist != null ||
+        editingPlaylistOrder != null
     BackHandler(
         enabled = !hasOpenDialog &&
             (showNowPlaying || vm.selectedPlaylist != null || mode != LibraryMode.ALL)
@@ -338,7 +348,7 @@ private fun MusicApp(vm: MusicViewModel) {
                                 vm.selectedPlaylist = null
                             },
                             icon = { Icon(Icons.Default.LibraryMusic, null) },
-                            label = { Text("Bibliothek") }
+                            label = { BottomNavigationLabel("Bibliothek") }
                         )
                         NavigationBarItem(
                             selected = mode == LibraryMode.FAVORITES,
@@ -347,7 +357,7 @@ private fun MusicApp(vm: MusicViewModel) {
                                 vm.selectedPlaylist = null
                             },
                             icon = { Icon(Icons.Default.Favorite, null) },
-                            label = { Text("Favoriten") }
+                            label = { BottomNavigationLabel("Favoriten") }
                         )
                         NavigationBarItem(
                             selected = mode == LibraryMode.PLAYLIST,
@@ -356,19 +366,19 @@ private fun MusicApp(vm: MusicViewModel) {
                                 vm.selectedPlaylist = null
                             },
                             icon = { Icon(Icons.Default.QueueMusic, null) },
-                            label = { Text("Playlists") }
+                            label = { BottomNavigationLabel("Playlists") }
                         )
                         NavigationBarItem(
                             selected = false,
                             onClick = { showThemePicker = true },
                             icon = { Icon(Icons.Default.Palette, null) },
-                            label = { Text("Design") }
+                            label = { BottomNavigationLabel("Design") }
                         )
                         NavigationBarItem(
                             selected = false,
                             onClick = { showBackup = true },
                             icon = { Icon(Icons.Default.SettingsBackupRestore, null) },
-                            label = { Text("Sicherung") }
+                            label = { BottomNavigationLabel("Sicherung") }
                         )
                     }
                 }
@@ -392,6 +402,7 @@ private fun MusicApp(vm: MusicViewModel) {
                         showLocalTransfer = true
                     },
                     onSharePlaylist = vm::sharePlaylist,
+                    onEditPlaylist = { editingPlaylistOrder = it },
                     onNewPlaylist = { showNewPlaylist = true }
                 )
                 SearchField(vm)
@@ -545,6 +556,17 @@ private fun MusicApp(vm: MusicViewModel) {
             }
         )
     }
+    editingPlaylistOrder?.let { playlist ->
+        PlaylistOrderDialog(
+            playlistName = playlist,
+            tracks = vm.playlistTracks(playlist),
+            onSave = { order ->
+                vm.setPlaylistOrder(playlist, order)
+                editingPlaylistOrder = null
+            },
+            onDismiss = { editingPlaylistOrder = null }
+        )
+    }
     editingTrack?.let { selected ->
         val track = vm.tracks.firstOrNull { it.id == selected.id } ?: selected
         EditTrackDialog(
@@ -575,6 +597,7 @@ private fun Header(
     onStats: () -> Unit,
     onLocalTransfer: () -> Unit,
     onSharePlaylist: (String) -> Unit,
+    onEditPlaylist: (String) -> Unit,
     onNewPlaylist: () -> Unit
 ) {
     var toolsExpanded by remember { mutableStateOf(false) }
@@ -608,6 +631,13 @@ private fun Header(
             }
         }
         if (playlistName != null) {
+            IconButton(onClick = { onEditPlaylist(playlistName) }) {
+                Icon(
+                    Icons.Default.Edit,
+                    "Playlist bearbeiten",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
             IconButton(onClick = { onSharePlaylist(playlistName) }) {
                 Icon(
                     Icons.Default.Share,
@@ -666,6 +696,176 @@ private fun Header(
             }
         }
     }
+}
+
+@Composable
+private fun BottomNavigationLabel(text: String) {
+    Text(
+        text = text,
+        maxLines = 1,
+        softWrap = false,
+        fontSize = 9.sp,
+        overflow = TextOverflow.Clip
+    )
+}
+
+@Composable
+private fun PlaylistOrderDialog(
+    playlistName: String,
+    tracks: List<AudioTrack>,
+    onSave: (List<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val orderedTracks = remember(playlistName, tracks.map { it.id }) {
+        tracks.toMutableStateList()
+    }
+    var draggingTrackId by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Playlist bearbeiten") },
+        text = {
+            Column {
+                Text(
+                    playlistName,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    "Halte die drei Striche gedrückt und ziehe den Song an die gewünschte Stelle.",
+                    modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp
+                )
+                if (orderedTracks.isEmpty()) {
+                    Text("Diese Playlist enthält noch keine Songs.")
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(420.dp)
+                    ) {
+                        itemsIndexed(orderedTracks, key = { _, track -> track.id }) { _, track ->
+                            val isDragging = draggingTrackId == track.id
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(72.dp)
+                                    .zIndex(if (isDragging) 1f else 0f)
+                                    .graphicsLayer {
+                                        translationY = if (isDragging) dragOffset else 0f
+                                        alpha = if (isDragging) 0.88f else 1f
+                                        shadowElevation = if (isDragging) 10f else 0f
+                                    }
+                                    .background(
+                                        if (isDragging) {
+                                            MaterialTheme.colorScheme.surfaceVariant
+                                        } else {
+                                            Color.Transparent
+                                        },
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .padding(horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .pointerInput(track.id) {
+                                            val rowHeightPx = 72.dp.toPx()
+                                            detectDragGesturesAfterLongPress(
+                                                onDragStart = {
+                                                    draggingTrackId = track.id
+                                                    dragOffset = 0f
+                                                },
+                                                onDragCancel = {
+                                                    draggingTrackId = null
+                                                    dragOffset = 0f
+                                                },
+                                                onDragEnd = {
+                                                    draggingTrackId = null
+                                                    dragOffset = 0f
+                                                },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    dragOffset += dragAmount.y
+                                                    while (dragOffset > rowHeightPx / 2f) {
+                                                        val currentIndex = orderedTracks.indexOfFirst {
+                                                            it.id == track.id
+                                                        }
+                                                        if (currentIndex < 0 ||
+                                                            currentIndex >= orderedTracks.lastIndex
+                                                        ) {
+                                                            dragOffset = rowHeightPx / 2f
+                                                            break
+                                                        }
+                                                        val moved = orderedTracks.removeAt(currentIndex)
+                                                        orderedTracks.add(currentIndex + 1, moved)
+                                                        dragOffset -= rowHeightPx
+                                                    }
+                                                    while (dragOffset < -rowHeightPx / 2f) {
+                                                        val currentIndex = orderedTracks.indexOfFirst {
+                                                            it.id == track.id
+                                                        }
+                                                        if (currentIndex <= 0) {
+                                                            dragOffset = -rowHeightPx / 2f
+                                                            break
+                                                        }
+                                                        val moved = orderedTracks.removeAt(currentIndex)
+                                                        orderedTracks.add(currentIndex - 1, moved)
+                                                        dragOffset += rowHeightPx
+                                                    }
+                                                }
+                                            )
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.DragHandle,
+                                        "Song verschieben",
+                                        tint = if (isDragging) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                    )
+                                }
+                                Cover(track.coverPath, 48)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        track.title,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        track.artist,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(orderedTracks.map { it.id }) },
+                enabled = orderedTracks.isNotEmpty()
+            ) {
+                Text("Speichern")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen") }
+        }
+    )
 }
 
 @Composable

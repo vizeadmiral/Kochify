@@ -10,6 +10,8 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - Shuffle, automatische Weiterschaltung und Endloswiederholung einzelner Titel
 - bearbeitbaren Titeln, Interpreten und Covern
 - automatischen YouTube-Thumbnails, eigenen Download-Covern und Cover-Mehrfachauswahl
+- vollständiger Sicherung und Wiederherstellung von Song- und Playlistbildern
+- Playlist-Editor mit Ziehgriffen für eine einfache Reihenfolge per Drag & Drop
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
 - automatische Kochify-Playlist, Gesamtfortschritt und Weiterlaufen bei einzelnen Fehlern
