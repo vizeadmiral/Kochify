@@ -32,7 +32,7 @@ jobs:
           if test -z "$KEYSTORE_BASE64" || test -z "$KEYSTORE_PASSWORD" || \
              test -z "$KEY_ALIAS" || test -z "$KEY_PASSWORD"; then
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "Release signing secrets are not configured; running a compile-only debug build."
+            echo "Release signing secrets are not configured; building the installable debug APK like previous Kochify versions."
             exit 0
           fi
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/kochify-release.jks"
@@ -68,7 +68,6 @@ jobs:
           path: Kochify-${{ steps.version.outputs.name }}.apk
           if-no-files-found: error
       - name: Publish public GitHub release
-        if: steps.signing.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.name }}
@@ -79,5 +78,5 @@ jobs:
           else
             gh release create "v$VERSION" "Kochify-$VERSION.apk" \
               --title "Kochify $VERSION" \
-              --notes "Kochify mit fester Update-Signatur. Ab dieser Version sind direkte Updates möglich."
+              --notes "Installierbare Android-Version von Kochify."
           fi
