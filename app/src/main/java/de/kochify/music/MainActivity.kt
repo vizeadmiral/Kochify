@@ -62,6 +62,7 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
@@ -342,6 +343,7 @@ private fun MusicApp(vm: MusicViewModel) {
                     onImport = { audioPicker.launch("audio/*") },
                     onDownload = { showDownload = true },
                     onSpotifyImport = { showSpotifyImport = true },
+                    onSharePlaylist = vm::sharePlaylist,
                     onNewPlaylist = { showNewPlaylist = true }
                 )
                 SearchField(vm)
@@ -353,6 +355,7 @@ private fun MusicApp(vm: MusicViewModel) {
                         onCreate = { showNewPlaylist = true },
                         spotifyUrlFor = vm::spotifyPlaylistUrl,
                         onOpenSpotify = vm::openSpotifyPlaylist,
+                        onShare = vm::sharePlaylist,
                         onRename = { renamingPlaylist = it },
                         onDelete = { deletingPlaylist = it }
                     )
@@ -480,6 +483,7 @@ private fun Header(
     onImport: () -> Unit,
     onDownload: () -> Unit,
     onSpotifyImport: () -> Unit,
+    onSharePlaylist: (String) -> Unit,
     onNewPlaylist: () -> Unit
 ) {
     Row(
@@ -511,25 +515,36 @@ private fun Header(
                 )
             }
         }
-        IconButton(onClick = onImport) {
-            Icon(Icons.Default.Add, "MP3 importieren")
+        if (playlistName != null) {
+            IconButton(onClick = { onSharePlaylist(playlistName) }) {
+                Icon(
+                    Icons.Default.Share,
+                    "Playlist teilen",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
         }
-        IconButton(onClick = onDownload) {
-            Icon(
-                Icons.Default.Download,
-                "Link herunterladen",
-                tint = MaterialTheme.colorScheme.primary
-            )
-        }
-        IconButton(onClick = onSpotifyImport) {
-            Icon(
-                Icons.Default.Sync,
-                "Spotify-Playlists importieren",
-                tint = MaterialTheme.colorScheme.primary
-            )
-        }
-        IconButton(onClick = onNewPlaylist) {
-            Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
+        if (playlistName == null) {
+            IconButton(onClick = onImport) {
+                Icon(Icons.Default.Add, "MP3 importieren")
+            }
+            IconButton(onClick = onDownload) {
+                Icon(
+                    Icons.Default.Download,
+                    "Link herunterladen",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+            IconButton(onClick = onSpotifyImport) {
+                Icon(
+                    Icons.Default.Sync,
+                    "Spotify-Playlists importieren",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+            IconButton(onClick = onNewPlaylist) {
+                Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
+            }
         }
     }
 }
@@ -589,6 +604,7 @@ private fun TrackList(
                 onFavorite = { vm.toggleFavorite(track.id) },
                 onEdit = { onEdit(track) },
                 onPlaylist = { onPlaylist(track) },
+                onShare = { vm.shareTrack(track) },
                 onDelete = { vm.deleteTrack(track) }
             )
         }
@@ -603,6 +619,7 @@ private fun TrackRow(
     onFavorite: () -> Unit,
     onEdit: () -> Unit,
     onPlaylist: () -> Unit,
+    onShare: () -> Unit,
     onDelete: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -665,6 +682,11 @@ private fun TrackRow(
                     onClick = { expanded = false; onPlaylist() }
                 )
                 androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Song teilen") },
+                    leadingIcon = { Icon(Icons.Default.Share, null) },
+                    onClick = { expanded = false; onShare() }
+                )
+                androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Aus der App löschen") },
                     leadingIcon = { Icon(Icons.Default.Delete, null) },
                     onClick = { expanded = false; onDelete() }
@@ -681,6 +703,7 @@ private fun PlaylistList(
     onCreate: () -> Unit,
     spotifyUrlFor: (String) -> String?,
     onOpenSpotify: (String) -> Unit,
+    onShare: (String) -> Unit,
     onRename: (String) -> Unit,
     onDelete: (String) -> Unit
 ) {
@@ -754,6 +777,14 @@ private fun PlaylistList(
                         expanded = expanded,
                         onDismissRequest = { expanded = false }
                     ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Playlist teilen") },
+                            leadingIcon = { Icon(Icons.Default.Share, null) },
+                            onClick = {
+                                expanded = false
+                                onShare(playlist)
+                            }
+                        )
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("Playlist umbenennen") },
                             leadingIcon = { Icon(Icons.Default.Edit, null) },
@@ -947,6 +978,14 @@ private fun NowPlayingScreen(
                                 onClick = {
                                     expanded = false
                                     onEdit()
+                                }
+                            )
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Song teilen") },
+                                leadingIcon = { Icon(Icons.Default.Share, null) },
+                                onClick = {
+                                    expanded = false
+                                    vm.shareTrack(track)
                                 }
                             )
                             androidx.compose.material3.DropdownMenuItem(

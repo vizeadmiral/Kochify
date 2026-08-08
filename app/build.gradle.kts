@@ -12,8 +12,8 @@ android {
         applicationId = "de.kochify.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.3.3"
+        versionCode = 16
+        versionName = "1.3.4"
     }
 
     buildFeatures {
@@ -52,6 +52,7 @@ dependencies {
 
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.activity:activity-ktx:1.10.0")
+    implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")

@@ -28,7 +28,8 @@ internal data class KochifyBackupImport(
     val themeMode: KochifyThemeMode,
     val shuffleEnabled: Boolean,
     val repeatOneEnabled: Boolean,
-    val restoredAudioFiles: Int
+    val restoredAudioFiles: Int,
+    val includeSettings: Boolean
 )
 
 internal object KochifyBackupManager {
@@ -44,7 +45,8 @@ internal object KochifyBackupManager {
         themeMode: KochifyThemeMode,
         shuffleEnabled: Boolean,
         repeatOneEnabled: Boolean,
-        includeMusic: Boolean
+        includeMusic: Boolean,
+        includeSettings: Boolean = true
     ): Int {
         val preparedTracks = tracks.map { track ->
             val audioFile = File(track.path).takeIf { includeMusic && it.isFile }
@@ -65,6 +67,7 @@ internal object KochifyBackupManager {
             put("version", BACKUP_VERSION)
             put("createdAt", System.currentTimeMillis())
             put("includeMusic", includeMusic)
+            put("includeSettings", includeSettings)
             put("themeMode", themeMode.name)
             put("shuffleEnabled", shuffleEnabled)
             put("repeatOneEnabled", repeatOneEnabled)
@@ -213,7 +216,8 @@ internal object KochifyBackupManager {
                 themeMode = restoredTheme,
                 shuffleEnabled = root.optBoolean("shuffleEnabled"),
                 repeatOneEnabled = root.optBoolean("repeatOneEnabled"),
-                restoredAudioFiles = restoredAudioFiles
+                restoredAudioFiles = restoredAudioFiles,
+                includeSettings = root.optBoolean("includeSettings", true)
             )
         } finally {
             tempRoot.deleteRecursively()

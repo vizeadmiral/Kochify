@@ -1,11 +1,14 @@
 package de.kochify.music
 
 import android.app.Application
+import android.content.ClipData
 import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Environment
 import android.util.Base64
+import android.webkit.MimeTypeMap
+import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -15,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.core.content.FileProvider
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -102,6 +106,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var downloaderReady = false
     @Volatile
     private var downloaderUpdateChecked = false
+    @Volatile
+    private var playlistShareBusy = false
     private val prefs = app.getSharedPreferences("kochify_music", 0)
     private val musicDir = File(app.filesDir, "music").apply { mkdirs() }
     private val coversDir = File(app.filesDir, "covers").apply { mkdirs() }
@@ -251,6 +257,105 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun shareTrack(track: AudioTrack) {
+        runCatching {
+            val file = File(track.path)
+            require(file.isFile) { "Die Audiodatei wurde nicht gefunden." }
+            val uri = FileProvider.getUriForFile(
+                app,
+                "${app.packageName}.fileprovider",
+                file
+            )
+            val mimeType = MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(file.extension.lowercase())
+                ?: "audio/*"
+            launchShareChooser(
+                uri = uri,
+                mimeType = mimeType,
+                title = "${track.title} – ${track.artist}",
+                chooserTitle = "Song teilen"
+            )
+        }.onFailure { error ->
+            Toast.makeText(
+                app,
+                "Song konnte nicht geteilt werden: " +
+                    (error.message ?: "Unbekannter Fehler"),
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    fun sharePlaylist(name: String) {
+        if (playlistShareBusy) {
+            Toast.makeText(
+                app,
+                "Eine Playlist wird bereits vorbereitet.",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        val playlistTracks = tracks
+            .filter { name in it.playlists }
+            .map { it.copy(favorite = false, playlists = setOf(name)) }
+        val themeSnapshot = themeMode
+        val shuffleSnapshot = shuffleEnabled
+        val repeatSnapshot = repeatOneEnabled
+        playlistShareBusy = true
+        Toast.makeText(
+            app,
+            "Playlist wird zum Teilen vorbereitet …",
+            Toast.LENGTH_SHORT
+        ).show()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val shareDir = File(app.cacheDir, "shared").apply { mkdirs() }
+                val shareFile = File(
+                    shareDir,
+                    "${safeFileName(name)}-${System.currentTimeMillis()}.kochify"
+                ).apply {
+                    parentFile?.mkdirs()
+                    createNewFile()
+                }
+                val uri = FileProvider.getUriForFile(
+                    app,
+                    "${app.packageName}.fileprovider",
+                    shareFile
+                )
+                KochifyBackupManager.export(
+                    context = app,
+                    uri = uri,
+                    tracks = playlistTracks,
+                    playlists = listOf(name),
+                    themeMode = themeSnapshot,
+                    shuffleEnabled = shuffleSnapshot,
+                    repeatOneEnabled = repeatSnapshot,
+                    includeMusic = true,
+                    includeSettings = false
+                )
+                withContext(Dispatchers.Main) {
+                    launchShareChooser(
+                        uri = uri,
+                        mimeType = "application/zip",
+                        title = "Kochify-Playlist: $name",
+                        chooserTitle = "Playlist teilen"
+                    )
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        app,
+                        "Playlist konnte nicht geteilt werden: " +
+                            (e.message ?: "Unbekannter Fehler"),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } finally {
+                playlistShareBusy = false
+            }
+        }
+    }
+
     fun importKochifyBackup(uri: Uri) {
         if (isBackupBusy) return
         isBackupBusy = true
@@ -304,19 +409,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    themeMode = imported.themeMode
-                    shuffleEnabled = imported.shuffleEnabled
-                    repeatOneEnabled = imported.repeatOneEnabled
-                    player.repeatMode = if (repeatOneEnabled) {
-                        Player.REPEAT_MODE_ONE
-                    } else {
-                        Player.REPEAT_MODE_OFF
+                    if (imported.includeSettings) {
+                        themeMode = imported.themeMode
+                        shuffleEnabled = imported.shuffleEnabled
+                        repeatOneEnabled = imported.repeatOneEnabled
+                        player.repeatMode = if (repeatOneEnabled) {
+                            Player.REPEAT_MODE_ONE
+                        } else {
+                            Player.REPEAT_MODE_OFF
+                        }
+                        prefs.edit()
+                            .putString("theme_mode", themeMode.name)
+                            .putBoolean("shuffle_enabled", shuffleEnabled)
+                            .putBoolean("repeat_one_enabled", repeatOneEnabled)
+                            .apply()
                     }
-                    prefs.edit()
-                        .putString("theme_mode", themeMode.name)
-                        .putBoolean("shuffle_enabled", shuffleEnabled)
-                        .putBoolean("repeat_one_enabled", repeatOneEnabled)
-                        .apply()
                     save()
                     backupStatus = buildString {
                         append("Import abgeschlossen: ${imported.playlists.size} Playlists")
@@ -631,6 +738,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         .trimEnd('.')
         .take(80)
         .ifBlank { "YouTube-Playlist" }
+
+    private fun launchShareChooser(
+        uri: Uri,
+        mimeType: String,
+        title: String,
+        chooserTitle: String
+    ) {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_TITLE, title)
+            putExtra(Intent.EXTRA_TEXT, title)
+            clipData = ClipData.newUri(app.contentResolver, title, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        app.startActivity(
+            Intent.createChooser(shareIntent, chooserTitle).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        )
+    }
 
     private fun mp3Files(directory: File): List<File> = directory.walkTopDown()
         .filter { it.isFile && it.extension.equals("mp3", true) }
