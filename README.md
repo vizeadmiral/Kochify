@@ -8,16 +8,11 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - MP3-Import über den Android-Dateidialog
 - Suche, Favoriten und eigene Playlists
 - Shuffle, automatische Weiterschaltung und Endloswiederholung einzelner Titel
-- auswählbare Designs: Schwarz, Hell und animierte RGB-Farben
-- Vollbild-Player mit großem Cover, Zeitleiste, Shuffle, Endloswiederholung und Songoptionen
-- zuverlässige Hintergrundwiedergabe mit Vordergrunddienst, Wake-Lock und Musikbenachrichtigung
-- Import und Export als Kochify-Sicherung, wahlweise mit allen Songs und Covern
-- Bluetooth- und Headset-Steuerung über Android MediaSession: Play/Pause, nächster und vorheriger Titel
 - bearbeitbaren Titeln, Interpreten und Covern
+- automatischen YouTube-Thumbnails, eigenen Download-Covern und Cover-Mehrfachauswahl
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
 - automatische Kochify-Playlist, Gesamtfortschritt und Weiterlaufen bei einzelnen Fehlern
-- gesperrte, gelöschte oder private Playlist-Einträge werden automatisch übersprungen
 - sichtbarer Rechtebestätigung vor jedem Link-Download
 
 ## Spotify-Playlists importieren

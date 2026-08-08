@@ -236,6 +236,7 @@ private fun MusicApp(vm: MusicViewModel) {
     var showBackup by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
     var showLocalTransfer by remember { mutableStateOf(false) }
+    var showBulkCover by remember { mutableStateOf(false) }
     var backupIncludesMusic by remember { mutableStateOf(true) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var showNowPlaying by remember { mutableStateOf(false) }
@@ -285,7 +286,7 @@ private fun MusicApp(vm: MusicViewModel) {
 
     val activeTrack = vm.currentTrack
     val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
-        showBackup || showStats || showLocalTransfer || showNewPlaylist ||
+        showBackup || showStats || showLocalTransfer || showBulkCover || showNewPlaylist ||
         editingTrack != null || playlistTrack != null ||
         renamingPlaylist != null || deletingPlaylist != null
     BackHandler(
@@ -423,6 +424,7 @@ private fun MusicApp(vm: MusicViewModel) {
                         onEdit = { editingTrack = it },
                         onPlaylist = { playlistTrack = it },
                         playlistName = vm.selectedPlaylist,
+                        onBulkCover = { showBulkCover = true },
                         onLocalTransfer = { track ->
                             showLocalTransfer = true
                             vm.startTrackLocalTransfer(track)
@@ -497,6 +499,16 @@ private fun MusicApp(vm: MusicViewModel) {
                 vm.closeLocalTransfer()
                 showLocalTransfer = false
             }
+        )
+    }
+    if (showBulkCover) {
+        BulkCoverDialog(
+            tracks = vm.visibleTracks(mode),
+            onApply = { trackIds, coverUri ->
+                vm.setCovers(trackIds, coverUri)
+                showBulkCover = false
+            },
+            onDismiss = { showBulkCover = false }
         )
     }
     if (showNewPlaylist) {
@@ -679,6 +691,7 @@ private fun TrackList(
     onEdit: (AudioTrack) -> Unit,
     onPlaylist: (AudioTrack) -> Unit,
     playlistName: String?,
+    onBulkCover: () -> Unit,
     onLocalTransfer: (AudioTrack) -> Unit
 ) {
     if (tracks.isEmpty()) {
@@ -702,6 +715,26 @@ private fun TrackList(
     LazyColumn(
         contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)
     ) {
+        item(key = "bulk-cover-action") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "${tracks.size} Song${if (tracks.size == 1) "" else "s"}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onBulkCover) {
+                    Icon(Icons.Default.Photo, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Cover mehrfach ändern")
+                }
+            }
+        }
         items(tracks, key = { it.id }) { track ->
             TrackRow(
                 track = track,
@@ -1722,11 +1755,20 @@ private fun DownloadDialog(
     progress: Float,
     status: String?,
     onDismiss: () -> Unit,
-    onDownload: (String, Boolean) -> Unit
+    onDownload: (String, Boolean, Uri?) -> Unit
 ) {
     var url by remember { mutableStateOf("") }
     var confirmed by remember { mutableStateOf(false) }
-    var useYoutubeCovers by remember { mutableStateOf(true) }
+    var coverMode by remember { mutableStateOf(DownloadCoverMode.YOUTUBE) }
+    var customCoverUri by remember { mutableStateOf<Uri?>(null) }
+    val customCoverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            customCoverUri = uri
+            coverMode = DownloadCoverMode.CUSTOM
+        }
+    }
     val looksLikePlaylist = url.contains("list=", ignoreCase = true) ||
         url.contains("/playlist", ignoreCase = true)
     AlertDialog(
@@ -1761,14 +1803,48 @@ private fun DownloadDialog(
                     )
                     Text("Ich besitze die nötigen Rechte.")
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = useYoutubeCovers,
-                        onCheckedChange = { useYoutubeCovers = it },
+                Text(
+                    "Song-Cover",
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                DownloadCoverOption(
+                    selected = coverMode == DownloadCoverMode.YOUTUBE,
+                    title = "YouTube-Thumbnails übernehmen",
+                    enabled = !downloading,
+                    onSelect = { coverMode = DownloadCoverMode.YOUTUBE }
+                )
+                DownloadCoverOption(
+                    selected = coverMode == DownloadCoverMode.CUSTOM,
+                    title = if (customCoverUri == null) {
+                        "Eigenes Cover für alle Downloads"
+                    } else {
+                        "Eigenes Cover ausgewählt"
+                    },
+                    enabled = !downloading,
+                    onSelect = {
+                        coverMode = DownloadCoverMode.CUSTOM
+                        if (customCoverUri == null) customCoverPicker.launch("image/*")
+                    }
+                )
+                if (coverMode == DownloadCoverMode.CUSTOM) {
+                    TextButton(
+                        onClick = { customCoverPicker.launch("image/*") },
                         enabled = !downloading
-                    )
-                    Text("YouTube-Thumbnails als Cover übernehmen")
+                    ) {
+                        Icon(Icons.Default.Photo, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (customCoverUri == null) "Cover auswählen" else "Cover wechseln"
+                        )
+                    }
                 }
+                DownloadCoverOption(
+                    selected = coverMode == DownloadCoverMode.NONE,
+                    title = "Ohne Cover herunterladen",
+                    enabled = !downloading,
+                    onSelect = { coverMode = DownloadCoverMode.NONE }
+                )
                 if (downloading) {
                     LinearProgressIndicator(
                         progress = { progress },
@@ -1793,8 +1869,15 @@ private fun DownloadDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onDownload(url, useYoutubeCovers) },
-                enabled = confirmed && url.isNotBlank() && !downloading
+                onClick = {
+                    onDownload(
+                        url,
+                        coverMode == DownloadCoverMode.YOUTUBE,
+                        customCoverUri.takeIf { coverMode == DownloadCoverMode.CUSTOM }
+                    )
+                },
+                enabled = confirmed && url.isNotBlank() && !downloading &&
+                    (coverMode != DownloadCoverMode.CUSTOM || customCoverUri != null)
             ) {
                 if (downloading) {
                     CircularProgressIndicator(
@@ -1816,6 +1899,34 @@ private fun DownloadDialog(
             TextButton(onClick = onDismiss, enabled = !downloading) { Text("Schließen") }
         }
     )
+}
+
+private enum class DownloadCoverMode {
+    YOUTUBE,
+    CUSTOM,
+    NONE
+}
+
+@Composable
+private fun DownloadCoverOption(
+    selected: Boolean,
+    title: String,
+    enabled: Boolean,
+    onSelect: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onSelect),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onSelect,
+            enabled = enabled
+        )
+        Text(title)
+    }
 }
 
 @Composable
@@ -1890,6 +2001,127 @@ private fun SpotifyImportDialog(
             TextButton(onClick = onDismiss, enabled = !importing) {
                 Text("Schließen")
             }
+        }
+    )
+}
+
+@Composable
+private fun BulkCoverDialog(
+    tracks: List<AudioTrack>,
+    onApply: (Set<String>, Uri) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedIds by remember(tracks.map { it.id }) {
+        mutableStateOf(emptySet<String>())
+    }
+    var coverUri by remember { mutableStateOf<Uri?>(null) }
+    val coverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) coverUri = uri
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Cover für mehrere Songs") },
+        text = {
+            Column {
+                Text(
+                    "Wähle alle Songs aus, die dasselbe neue Cover erhalten sollen.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { selectedIds = tracks.map { it.id }.toSet() }
+                    ) {
+                        Text("Alle auswählen")
+                    }
+                    TextButton(onClick = { selectedIds = emptySet() }) {
+                        Text("Auswahl löschen")
+                    }
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp)
+                ) {
+                    items(tracks, key = { "cover-${it.id}" }) { track ->
+                        val selected = track.id in selectedIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    selectedIds = if (selected) {
+                                        selectedIds - track.id
+                                    } else {
+                                        selectedIds + track.id
+                                    }
+                                }
+                                .padding(vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = selected,
+                                onCheckedChange = {
+                                    selectedIds = if (selected) {
+                                        selectedIds - track.id
+                                    } else {
+                                        selectedIds + track.id
+                                    }
+                                }
+                            )
+                            Cover(track.coverPath, 42)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    track.title,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    track.artist,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { coverPicker.launch("image/*") },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Photo, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (coverUri == null) "Neues Cover auswählen" else "Cover wechseln")
+                }
+                if (coverUri != null) {
+                    Text(
+                        "Cover ausgewählt · ${selectedIds.size} Song(s) markiert",
+                        modifier = Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { coverUri?.let { onApply(selectedIds, it) } },
+                enabled = selectedIds.isNotEmpty() && coverUri != null
+            ) {
+                Text("Auf ${selectedIds.size} anwenden")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen") }
         }
     )
 }

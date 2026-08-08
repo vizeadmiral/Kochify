@@ -647,7 +647,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadFromYoutube(url: String, useYoutubeCovers: Boolean = true) {
+    fun downloadFromYoutube(
+        url: String,
+        useYoutubeCovers: Boolean = true,
+        customCoverUri: Uri? = null
+    ) {
         if (url.isBlank() || isDownloading) return
         val cleanUrl = url.trim()
         if (!isYoutubeUrl(cleanUrl)) {
@@ -676,7 +680,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 ).apply { mkdirs() }
 
                 if (playlistName != null) {
-                    if (useYoutubeCovers) {
+                    if (customCoverUri != null) {
+                        copyLocalCover(
+                            customCoverUri,
+                            "playlist-custom-${stableKey(playlistName)}"
+                        )?.let { cover ->
+                            withContext(Dispatchers.Main) {
+                                playlistCovers[playlistName] = cover.absolutePath
+                                save()
+                            }
+                        }
+                    } else if (useYoutubeCovers) {
                         val playlistThumbnail = plan.thumbnailUrl
                             ?: plan.items.firstNotNullOfOrNull { it.thumbnailUrl }
                         playlistThumbnail?.let { thumbnail ->
@@ -761,15 +775,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         if (itemFiles.isEmpty()) {
                             failures += item.title
                         } else {
-                            val coverPath = if (useYoutubeCovers) {
-                                item.thumbnailUrl?.let { thumbnail ->
+                            val itemKey = stableKey(item.id.ifBlank { item.url })
+                            val coverPath = when {
+                                customCoverUri != null -> copyLocalCover(
+                                    customCoverUri,
+                                    "youtube-custom-$itemKey"
+                                )?.absolutePath
+                                useYoutubeCovers -> item.thumbnailUrl?.let { thumbnail ->
                                     downloadRemoteCover(
                                         thumbnail,
-                                        "youtube-${stableKey(item.id.ifBlank { item.url })}"
+                                        "youtube-$itemKey"
                                     )?.absolutePath
                                 }
-                            } else {
-                                null
+                                else -> null
                             }
                             itemFiles.forEach { addFile(it, playlistName, coverPath) }
                             if (newFiles.isEmpty()) reused++ else completed++
@@ -1006,6 +1024,32 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             throw error
         } finally {
             connection.disconnect()
+        }
+    }.getOrNull()
+
+    private fun copyLocalCover(uri: Uri, fileStem: String): File? = runCatching {
+        val target = File(coversDir, "$fileStem-${System.currentTimeMillis()}.jpg")
+        try {
+            app.contentResolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var written = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        written += count
+                        require(written <= 12L * 1024L * 1024L) {
+                            "Das Cover darf höchstens 12 MB groß sein."
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                }
+            } ?: error("Das ausgewählte Cover konnte nicht geöffnet werden.")
+            require(target.length() > 0L) { "Das ausgewählte Cover ist leer." }
+            target
+        } catch (error: Exception) {
+            target.delete()
+            throw error
         }
     }.getOrNull()
 
@@ -1744,10 +1788,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setCover(id: String, uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val target = File(coversDir, "$id.jpg")
-                app.contentResolver.openInputStream(uri)!!.use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
-                }
+                val target = copyLocalCover(uri, "song-${stableKey(id)}")
+                    ?: error("Cover konnte nicht kopiert werden.")
                 withContext(Dispatchers.Main) {
                     update(id) { it.copy(coverPath = target.absolutePath) }
                 }
@@ -1755,6 +1797,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.Main) {
                     downloadStatus = "Cover konnte nicht übernommen werden."
                 }
+            }
+        }
+    }
+
+    fun setCovers(ids: Set<String>, uri: Uri) {
+        if (ids.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val copied = ids.associateWith { id ->
+                copyLocalCover(uri, "song-${stableKey(id)}")?.absolutePath
+            }.filterValues { it != null }
+            withContext(Dispatchers.Main) {
+                var changed = 0
+                tracks.indices.forEach { index ->
+                    val path = copied[tracks[index].id] ?: return@forEach
+                    val updated = tracks[index].copy(coverPath = path)
+                    tracks[index] = updated
+                    if (currentTrack?.id == updated.id) currentTrack = updated
+                    changed++
+                }
+                if (changed > 0) save()
+                val message = if (changed == ids.size) {
+                    "Cover für $changed Song(s) geändert."
+                } else {
+                    "Cover für $changed von ${ids.size} Song(s) geändert."
+                }
+                downloadStatus = message
+                Toast.makeText(app, message, Toast.LENGTH_LONG).show()
             }
         }
     }
