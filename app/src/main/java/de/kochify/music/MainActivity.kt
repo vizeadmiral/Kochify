@@ -20,8 +20,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -53,6 +55,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -308,6 +311,8 @@ private fun MusicApp(vm: MusicViewModel) {
     var deletingPlaylist by remember { mutableStateOf<String?>(null) }
     var coveringPlaylist by remember { mutableStateOf<String?>(null) }
     var editingPlaylistOrder by remember { mutableStateOf<String?>(null) }
+    var selectedTrackIds by remember { mutableStateOf(emptySet<String>()) }
+    var playlistTargetsForTrackIds by remember { mutableStateOf<Set<String>?>(null) }
 
     val context = LocalContext.current
     val qrScanner = remember {
@@ -353,12 +358,14 @@ private fun MusicApp(vm: MusicViewModel) {
         showBulkPlaylistAssignment ||
         editingTrack != null || playlistTrack != null ||
         renamingPlaylist != null || deletingPlaylist != null ||
-        editingPlaylistOrder != null
+        editingPlaylistOrder != null || playlistTargetsForTrackIds != null
     BackHandler(
         enabled = !hasOpenDialog &&
-            (showNowPlaying || vm.selectedPlaylist != null || mode != LibraryMode.ALL)
+            (selectedTrackIds.isNotEmpty() || showNowPlaying ||
+                vm.selectedPlaylist != null || mode != LibraryMode.ALL)
     ) {
         when {
+            selectedTrackIds.isNotEmpty() -> selectedTrackIds = emptySet()
             showNowPlaying -> showNowPlaying = false
             vm.selectedPlaylist != null -> vm.selectedPlaylist = null
             mode != LibraryMode.ALL -> {
@@ -399,6 +406,7 @@ private fun MusicApp(vm: MusicViewModel) {
                         NavigationBarItem(
                             selected = mode == LibraryMode.ALL,
                             onClick = {
+                                selectedTrackIds = emptySet()
                                 mode = LibraryMode.ALL
                                 vm.selectedPlaylist = null
                             },
@@ -408,6 +416,7 @@ private fun MusicApp(vm: MusicViewModel) {
                         NavigationBarItem(
                             selected = mode == LibraryMode.FAVORITES,
                             onClick = {
+                                selectedTrackIds = emptySet()
                                 mode = LibraryMode.FAVORITES
                                 vm.selectedPlaylist = null
                             },
@@ -417,6 +426,7 @@ private fun MusicApp(vm: MusicViewModel) {
                         NavigationBarItem(
                             selected = mode == LibraryMode.PLAYLIST,
                             onClick = {
+                                selectedTrackIds = emptySet()
                                 mode = LibraryMode.PLAYLIST
                                 vm.selectedPlaylist = null
                             },
@@ -448,7 +458,10 @@ private fun MusicApp(vm: MusicViewModel) {
                 Header(
                     mode = mode,
                     playlistName = vm.selectedPlaylist,
-                    onBack = { vm.selectedPlaylist = null },
+                    onBack = {
+                        selectedTrackIds = emptySet()
+                        vm.selectedPlaylist = null
+                    },
                     onImport = {
                         audioPicker.launch(arrayOf("audio/mpeg", "audio/*"))
                     },
@@ -467,7 +480,10 @@ private fun MusicApp(vm: MusicViewModel) {
                 if (mode == LibraryMode.PLAYLIST && vm.selectedPlaylist == null) {
                     PlaylistList(
                         playlists = vm.playlists,
-                        onSelect = { vm.selectedPlaylist = it },
+                        onSelect = {
+                            selectedTrackIds = emptySet()
+                            vm.selectedPlaylist = it
+                        },
                         onCreate = { showNewPlaylist = true },
                         spotifyUrlFor = vm::spotifyPlaylistUrl,
                         onOpenSpotify = vm::openSpotifyPlaylist,
@@ -500,6 +516,11 @@ private fun MusicApp(vm: MusicViewModel) {
                             },
                         onBulkCover = { showBulkCover = true },
                         onBulkPlaylist = { showBulkPlaylistAssignment = true },
+                        selectedTrackIds = selectedTrackIds,
+                        onSelectionChange = { selectedTrackIds = it },
+                        onAddSelectedToPlaylist = { ids ->
+                            playlistTargetsForTrackIds = ids
+                        },
                         onLocalTransfer = { track ->
                             showLocalTransfer = true
                             vm.startTrackLocalTransfer(track)
@@ -595,6 +616,18 @@ private fun MusicApp(vm: MusicViewModel) {
                 showBulkPlaylistAssignment = false
             },
             onDismiss = { showBulkPlaylistAssignment = false }
+        )
+    }
+    playlistTargetsForTrackIds?.let { trackIds ->
+        PlaylistTargetSelectionDialog(
+            selectedTrackCount = trackIds.size,
+            playlists = vm.playlists,
+            onApply = { playlistNames ->
+                vm.addTracksToPlaylists(trackIds, playlistNames)
+                playlistTargetsForTrackIds = null
+                selectedTrackIds = emptySet()
+            },
+            onDismiss = { playlistTargetsForTrackIds = null }
         )
     }
     if (showNewPlaylist) {
@@ -977,6 +1010,9 @@ private fun TrackList(
     queueKey: String,
     onBulkCover: () -> Unit,
     onBulkPlaylist: () -> Unit,
+    selectedTrackIds: Set<String>,
+    onSelectionChange: (Set<String>) -> Unit,
+    onAddSelectedToPlaylist: (Set<String>) -> Unit,
     onLocalTransfer: (AudioTrack) -> Unit
 ) {
     if (tracks.isEmpty()) {
@@ -1007,21 +1043,47 @@ private fun TrackList(
                     .padding(horizontal = 16.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "${tracks.size} Song${if (tracks.size == 1) "" else "s"}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp
-                )
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = onBulkPlaylist) {
-                    Icon(Icons.Default.PlaylistAdd, null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Playlists")
-                }
-                TextButton(onClick = onBulkCover) {
-                    Icon(Icons.Default.Photo, null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Cover")
+                if (selectedTrackIds.isNotEmpty()) {
+                    IconButton(onClick = { onSelectionChange(emptySet()) }) {
+                        Icon(Icons.Default.Close, "Auswahl beenden")
+                    }
+                    Text(
+                        "${selectedTrackIds.size} ausgewählt",
+                        modifier = Modifier.weight(1f),
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    TextButton(
+                        onClick = { onSelectionChange(tracks.map { it.id }.toSet()) }
+                    ) {
+                        Text("Alle")
+                    }
+                    IconButton(
+                        onClick = { onAddSelectedToPlaylist(selectedTrackIds) }
+                    ) {
+                        Icon(
+                            Icons.Default.PlaylistAdd,
+                            "Ausgewählte Songs zu Playlists hinzufügen",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                } else {
+                    Text(
+                        "${tracks.size} Song${if (tracks.size == 1) "" else "s"}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onBulkPlaylist) {
+                        Icon(Icons.Default.PlaylistAdd, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Playlists")
+                    }
+                    TextButton(onClick = onBulkCover) {
+                        Icon(Icons.Default.Photo, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Cover")
+                    }
                 }
             }
         }
@@ -1029,6 +1091,20 @@ private fun TrackList(
             TrackRow(
                 track = track,
                 isCurrent = vm.currentTrack?.id == track.id,
+                selected = track.id in selectedTrackIds,
+                selectionMode = selectedTrackIds.isNotEmpty(),
+                onToggleSelection = {
+                    onSelectionChange(
+                        if (track.id in selectedTrackIds) {
+                            selectedTrackIds - track.id
+                        } else {
+                            selectedTrackIds + track.id
+                        }
+                    )
+                },
+                onLongPress = {
+                    onSelectionChange(selectedTrackIds + track.id)
+                },
                 onPlay = {
                     vm.play(track, tracks, queueKey)
                     onOpenPlayer()
@@ -1050,10 +1126,15 @@ private fun TrackList(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TrackRow(
     track: AudioTrack,
     isCurrent: Boolean,
+    selected: Boolean,
+    selectionMode: Boolean,
+    onToggleSelection: () -> Unit,
+    onLongPress: () -> Unit,
     onPlay: () -> Unit,
     onFavorite: () -> Unit,
     onEdit: () -> Unit,
@@ -1068,7 +1149,19 @@ private fun TrackRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onPlay)
+            .background(
+                if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                } else {
+                    Color.Transparent
+                }
+            )
+            .combinedClickable(
+                onClick = {
+                    if (selectionMode) onToggleSelection() else onPlay()
+                },
+                onLongClick = onLongPress
+            )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1094,25 +1187,31 @@ private fun TrackRow(
                 fontSize = 13.sp
             )
         }
-        IconButton(onClick = onFavorite) {
-            Icon(
-                if (track.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                "Favorit",
-                tint = if (track.favorite) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
+        if (selectionMode) {
+            Checkbox(
+                checked = selected,
+                onCheckedChange = { onToggleSelection() }
             )
-        }
-        Box {
-            IconButton(onClick = { expanded = true }) {
-                Icon(Icons.Default.MoreVert, "Mehr")
+        } else {
+            IconButton(onClick = onFavorite) {
+                Icon(
+                    if (track.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    "Favorit",
+                    tint = if (track.favorite) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
             }
-            androidx.compose.material3.DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false }
-            ) {
+            Box {
+                IconButton(onClick = { expanded = true }) {
+                    Icon(Icons.Default.MoreVert, "Mehr")
+                }
+                androidx.compose.material3.DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
+                ) {
                 androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Titel und Cover bearbeiten") },
                     leadingIcon = { Icon(Icons.Default.Edit, null) },
@@ -1152,6 +1251,7 @@ private fun TrackRow(
                     leadingIcon = { Icon(Icons.Default.Delete, null) },
                     onClick = { expanded = false; onDelete() }
                 )
+                }
             }
         }
     }
@@ -2307,6 +2407,99 @@ private fun SpotifyImportDialog(
             TextButton(onClick = onDismiss, enabled = !importing) {
                 Text("Schließen")
             }
+        }
+    )
+}
+
+@Composable
+private fun PlaylistTargetSelectionDialog(
+    selectedTrackCount: Int,
+    playlists: List<String>,
+    onApply: (Set<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedPlaylists by remember(playlists) {
+        mutableStateOf(emptySet<String>())
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$selectedTrackCount Songs hinzufügen") },
+        text = {
+            Column {
+                Text(
+                    "Wähle eine oder mehrere Ziel-Playlists aus.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (playlists.isEmpty()) {
+                    Text(
+                        "Erstelle zuerst eine Playlist.",
+                        modifier = Modifier.padding(top = 16.dp)
+                    )
+                } else {
+                    Row(Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = { selectedPlaylists = playlists.toSet() }
+                        ) {
+                            Text("Alle Playlists")
+                        }
+                        TextButton(onClick = { selectedPlaylists = emptySet() }) {
+                            Text("Auswahl löschen")
+                        }
+                    }
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(320.dp)
+                    ) {
+                        items(playlists, key = { "long-press-target-$it" }) { playlist ->
+                            val selected = playlist in selectedPlaylists
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedPlaylists = if (selected) {
+                                            selectedPlaylists - playlist
+                                        } else {
+                                            selectedPlaylists + playlist
+                                        }
+                                    }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = selected,
+                                    onCheckedChange = {
+                                        selectedPlaylists = if (selected) {
+                                            selectedPlaylists - playlist
+                                        } else {
+                                            selectedPlaylists + playlist
+                                        }
+                                    }
+                                )
+                                Icon(Icons.Default.QueueMusic, null)
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    playlist,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onApply(selectedPlaylists) },
+                enabled = selectedPlaylists.isNotEmpty()
+            ) {
+                Text("Hinzufügen")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen") }
         }
     )
 }

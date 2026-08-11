@@ -13,6 +13,7 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - vollständiger Sicherung und Wiederherstellung von Song- und Playlistbildern
 - Playlist-Editor mit Ziehgriffen für eine einfache Reihenfolge per Drag & Drop
 - Mehrfachimport lokaler MP3-Dateien und Mehrfachzuordnung zu mehreren Playlists
+- nativer Auswahlmodus durch langes Drücken direkt in jeder Songliste
 - Shuffle-Zyklen ohne Wiederholung, bis jeder Song der Wiedergabeliste gespielt wurde
 - Cyberpunk- und Deutschland-Design sowie ein stärker animierter RGB-Modus
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
