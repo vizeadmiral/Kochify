@@ -343,6 +343,43 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun shareTracks(trackIds: Set<String>) {
+        val selectedTracks = tracks.filter { it.id in trackIds }
+        val uris = arrayListOf<Uri>()
+        selectedTracks.forEach { track ->
+            val file = File(track.path)
+            if (file.isFile) {
+                uris += FileProvider.getUriForFile(
+                    app,
+                    "${app.packageName}.fileprovider",
+                    file
+                )
+            }
+        }
+        if (uris.isEmpty()) {
+            Toast.makeText(app, "Keine Audiodateien zum Teilen gefunden.", Toast.LENGTH_LONG)
+                .show()
+            return
+        }
+        val title = "${uris.size} Kochify-Songs"
+        val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "audio/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            putExtra(Intent.EXTRA_TITLE, title)
+            putExtra(Intent.EXTRA_TEXT, title)
+            clipData = ClipData.newUri(app.contentResolver, title, uris.first()).apply {
+                uris.drop(1).forEach { addItem(ClipData.Item(it)) }
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        app.startActivity(
+            Intent.createChooser(shareIntent, "Songs teilen").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        )
+    }
+
     fun sharePlaylist(name: String) {
         if (playlistShareBusy) {
             Toast.makeText(
@@ -420,6 +457,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             title = "Song: ${track.title}",
             fileName = track.title,
             packageTracks = listOf(track.copy(favorite = false, playlists = emptySet())),
+            packagePlaylists = emptyList(),
+            packagePlaylistCovers = emptyMap()
+        )
+    }
+
+    fun startTracksLocalTransfer(trackIds: Set<String>) {
+        val selectedTracks = tracks
+            .filter { it.id in trackIds }
+            .map { it.copy(favorite = false, playlists = emptySet()) }
+        startLocalTransfer(
+            title = "${selectedTracks.size} ausgewählte Songs",
+            fileName = "Kochify-${selectedTracks.size}-Songs",
+            packageTracks = selectedTracks,
             packagePlaylists = emptyList(),
             packagePlaylistCovers = emptyMap()
         )
@@ -1941,6 +1991,42 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         track.coverPath?.let { File(it).delete() }
         save()
+    }
+
+    fun deleteTracks(trackIds: Set<String>) {
+        val selectedTracks = tracks.filter { it.id in trackIds }
+        if (selectedTracks.isEmpty()) return
+        if (currentTrack?.id?.let { it in trackIds } == true) {
+            player.stop()
+            PlaybackKeepAliveService.stop(app)
+            currentTrack = null
+        }
+        tracks.removeAll { it.id in trackIds }
+        playlistOrders.keys.toList().forEach { playlist ->
+            playlistOrders[playlist] = playlistOrders[playlist].orEmpty()
+                .filterNot { it in trackIds }
+        }
+        selectedTracks.forEach { track ->
+            if ((track.path.startsWith(app.filesDir.absolutePath) ||
+                    track.path.startsWith(downloadDir.absolutePath)) &&
+                tracks.none { it.path == track.path }
+            ) {
+                File(track.path).delete()
+            }
+            track.coverPath?.let { coverPath ->
+                if (tracks.none { it.coverPath == coverPath } &&
+                    coverPath !in playlistCovers.values
+                ) {
+                    File(coverPath).delete()
+                }
+            }
+        }
+        save()
+        Toast.makeText(
+            app,
+            "${selectedTracks.size} Song(s) gelöscht.",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     fun visibleTracks(mode: LibraryMode): List<AudioTrack> {

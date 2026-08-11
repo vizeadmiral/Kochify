@@ -23,8 +23,8 @@ android {
         applicationId = "de.kochify.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "1.4.4"
+        versionCode = 22
+        versionName = "1.4.5"
     }
 
     buildFeatures {

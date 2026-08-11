@@ -313,6 +313,8 @@ private fun MusicApp(vm: MusicViewModel) {
     var editingPlaylistOrder by remember { mutableStateOf<String?>(null) }
     var selectedTrackIds by remember { mutableStateOf(emptySet<String>()) }
     var playlistTargetsForTrackIds by remember { mutableStateOf<Set<String>?>(null) }
+    var newPlaylistForTrackIds by remember { mutableStateOf<Set<String>?>(null) }
+    var deletingSelectedTrackIds by remember { mutableStateOf<Set<String>?>(null) }
 
     val context = LocalContext.current
     val qrScanner = remember {
@@ -358,7 +360,8 @@ private fun MusicApp(vm: MusicViewModel) {
         showBulkPlaylistAssignment ||
         editingTrack != null || playlistTrack != null ||
         renamingPlaylist != null || deletingPlaylist != null ||
-        editingPlaylistOrder != null || playlistTargetsForTrackIds != null
+        editingPlaylistOrder != null || playlistTargetsForTrackIds != null ||
+        newPlaylistForTrackIds != null || deletingSelectedTrackIds != null
     BackHandler(
         enabled = !hasOpenDialog &&
             (selectedTrackIds.isNotEmpty() || showNowPlaying ||
@@ -521,6 +524,21 @@ private fun MusicApp(vm: MusicViewModel) {
                         onAddSelectedToPlaylist = { ids ->
                             playlistTargetsForTrackIds = ids
                         },
+                        onCreatePlaylistForSelected = { ids ->
+                            newPlaylistForTrackIds = ids
+                        },
+                        onDeleteSelected = { ids ->
+                            deletingSelectedTrackIds = ids
+                        },
+                        onShareSelected = { ids ->
+                            vm.shareTracks(ids)
+                            selectedTrackIds = emptySet()
+                        },
+                        onTransferSelected = { ids ->
+                            showLocalTransfer = true
+                            vm.startTracksLocalTransfer(ids)
+                            selectedTrackIds = emptySet()
+                        },
                         onLocalTransfer = { track ->
                             showLocalTransfer = true
                             vm.startTrackLocalTransfer(track)
@@ -628,6 +646,31 @@ private fun MusicApp(vm: MusicViewModel) {
                 selectedTrackIds = emptySet()
             },
             onDismiss = { playlistTargetsForTrackIds = null }
+        )
+    }
+    newPlaylistForTrackIds?.let { trackIds ->
+        TextInputDialog(
+            title = "Neue Playlist für ${trackIds.size} Songs",
+            label = "Playlistname",
+            onDismiss = { newPlaylistForTrackIds = null },
+            onConfirm = { name ->
+                val cleanName = name.trim()
+                vm.createPlaylist(cleanName)
+                vm.addTracksToPlaylists(trackIds, setOf(cleanName))
+                newPlaylistForTrackIds = null
+                selectedTrackIds = emptySet()
+            }
+        )
+    }
+    deletingSelectedTrackIds?.let { trackIds ->
+        DeleteSelectedSongsDialog(
+            count = trackIds.size,
+            onDismiss = { deletingSelectedTrackIds = null },
+            onConfirm = {
+                vm.deleteTracks(trackIds)
+                deletingSelectedTrackIds = null
+                selectedTrackIds = emptySet()
+            }
         )
     }
     if (showNewPlaylist) {
@@ -1013,8 +1056,13 @@ private fun TrackList(
     selectedTrackIds: Set<String>,
     onSelectionChange: (Set<String>) -> Unit,
     onAddSelectedToPlaylist: (Set<String>) -> Unit,
+    onCreatePlaylistForSelected: (Set<String>) -> Unit,
+    onDeleteSelected: (Set<String>) -> Unit,
+    onShareSelected: (Set<String>) -> Unit,
+    onTransferSelected: (Set<String>) -> Unit,
     onLocalTransfer: (AudioTrack) -> Unit
 ) {
+    var selectionActionsExpanded by remember { mutableStateOf(false) }
     if (tracks.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1033,62 +1081,108 @@ private fun TrackList(
         }
         return
     }
-    LazyColumn(
-        contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)
-    ) {
-        item(key = "bulk-actions") {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (selectedTrackIds.isNotEmpty()) {
-                    IconButton(onClick = { onSelectionChange(emptySet()) }) {
-                        Icon(Icons.Default.Close, "Auswahl beenden")
-                    }
-                    Text(
-                        "${selectedTrackIds.size} ausgewählt",
-                        modifier = Modifier.weight(1f),
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    TextButton(
-                        onClick = { onSelectionChange(tracks.map { it.id }.toSet()) }
-                    ) {
-                        Text("Alle")
-                    }
-                    IconButton(
-                        onClick = { onAddSelectedToPlaylist(selectedTrackIds) }
-                    ) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (selectedTrackIds.isNotEmpty()) {
+                IconButton(onClick = { onSelectionChange(emptySet()) }) {
+                    Icon(Icons.Default.Close, "Auswahl beenden")
+                }
+                Text(
+                    "${selectedTrackIds.size} ausgewählt",
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                TextButton(
+                    onClick = { onSelectionChange(tracks.map { it.id }.toSet()) }
+                ) {
+                    Text("Alle")
+                }
+                Box {
+                    IconButton(onClick = { selectionActionsExpanded = true }) {
                         Icon(
-                            Icons.Default.PlaylistAdd,
-                            "Ausgewählte Songs zu Playlists hinzufügen",
+                            Icons.Default.MoreVert,
+                            "Aktionen für ausgewählte Songs",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
-                } else {
-                    Text(
-                        "${tracks.size} Song${if (tracks.size == 1) "" else "s"}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onBulkPlaylist) {
-                        Icon(Icons.Default.PlaylistAdd, null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Playlists")
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = selectionActionsExpanded,
+                        onDismissRequest = { selectionActionsExpanded = false }
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Zu Playlists hinzufügen") },
+                            leadingIcon = { Icon(Icons.Default.PlaylistAdd, null) },
+                            onClick = {
+                                selectionActionsExpanded = false
+                                onAddSelectedToPlaylist(selectedTrackIds)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Neue Playlist erstellen") },
+                            leadingIcon = { Icon(Icons.Default.Add, null) },
+                            onClick = {
+                                selectionActionsExpanded = false
+                                onCreatePlaylistForSelected(selectedTrackIds)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Ausgewählte Songs teilen") },
+                            leadingIcon = { Icon(Icons.Default.Share, null) },
+                            onClick = {
+                                selectionActionsExpanded = false
+                                onShareSelected(selectedTrackIds)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Ausgewählte per QR übertragen") },
+                            leadingIcon = { Icon(Icons.Default.QrCode2, null) },
+                            onClick = {
+                                selectionActionsExpanded = false
+                                onTransferSelected(selectedTrackIds)
+                            }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Ausgewählte Songs löschen") },
+                            leadingIcon = { Icon(Icons.Default.Delete, null) },
+                            onClick = {
+                                selectionActionsExpanded = false
+                                onDeleteSelected(selectedTrackIds)
+                            }
+                        )
                     }
-                    TextButton(onClick = onBulkCover) {
-                        Icon(Icons.Default.Photo, null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Cover")
-                    }
+                }
+            } else {
+                Text(
+                    "${tracks.size} Song${if (tracks.size == 1) "" else "s"}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onBulkPlaylist) {
+                    Icon(Icons.Default.PlaylistAdd, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Playlists")
+                }
+                TextButton(onClick = onBulkCover) {
+                    Icon(Icons.Default.Photo, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Cover")
                 }
             }
         }
-        items(tracks, key = { it.id }) { track ->
-            TrackRow(
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)
+        ) {
+            items(tracks, key = { it.id }) { track ->
+                TrackRow(
                 track = track,
                 isCurrent = vm.currentTrack?.id == track.id,
                 selected = track.id in selectedTrackIds,
@@ -1121,7 +1215,8 @@ private fun TrackList(
                     { vm.moveTrackInPlaylist(it, track.id, 1) }
                 },
                 onDelete = { vm.deleteTrack(track) }
-            )
+                )
+            }
         }
     }
 }
@@ -2886,6 +2981,32 @@ private fun TextInputDialog(
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Abbrechen") } }
+    )
+}
+
+@Composable
+private fun DeleteSelectedSongsDialog(
+    count: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$count Songs löschen?") },
+        text = {
+            Text(
+                "Die ausgewählten Songs werden aus Kochify und aus allen Playlists entfernt. " +
+                    "Importierte oder heruntergeladene App-Dateien werden ebenfalls gelöscht."
+            )
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("Songs löschen")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen") }
+        }
     )
 }
 
