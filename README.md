@@ -12,6 +12,9 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - automatischen YouTube-Thumbnails, eigenen Download-Covern und Cover-Mehrfachauswahl
 - vollständiger Sicherung und Wiederherstellung von Song- und Playlistbildern
 - Playlist-Editor mit Ziehgriffen für eine einfache Reihenfolge per Drag & Drop
+- Mehrfachimport lokaler MP3-Dateien und Mehrfachzuordnung zu mehreren Playlists
+- Shuffle-Zyklen ohne Wiederholung, bis jeder Song der Wiedergabeliste gespielt wurde
+- Cyberpunk- und Deutschland-Design sowie ein stärker animierter RGB-Modus
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3
 - automatische Kochify-Playlist, Gesamtfortschritt und Weiterlaufen bei einzelnen Fehlern

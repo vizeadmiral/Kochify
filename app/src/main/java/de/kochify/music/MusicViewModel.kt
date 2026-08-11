@@ -103,7 +103,9 @@ data class LocalTransferOffer(
 enum class KochifyThemeMode {
     BLACK,
     LIGHT,
-    RGB
+    RGB,
+    CYBERPUNK,
+    GERMANY
 }
 
 private data class YoutubeDownloadItem(
@@ -169,6 +171,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         setWakeMode(C.WAKE_MODE_LOCAL)
     }
     private var playbackQueue: List<AudioTrack> = emptyList()
+    private var playbackQueueKey: String = "library"
+    private var shuffleSessionSignature: String? = null
+    private val shuffleRemainingIds = mutableListOf<String>()
     private var activeListeningStartedAt = 0L
     private var transferServer: ServerSocket? = null
 
@@ -642,7 +647,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             withContext(Dispatchers.Main) {
-                downloadStatus = "$imported Audiodatei(en) importiert."
+                val message = "$imported MP3-Datei(en) vom Handy importiert."
+                downloadStatus = message
+                Toast.makeText(app, message, Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -1541,10 +1548,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun play(
         track: AudioTrack,
-        queue: List<AudioTrack> = tracks.toList()
+        queue: List<AudioTrack> = tracks.toList(),
+        sourceKey: String? = null
     ) {
+        val preparedQueue = queue.ifEmpty { tracks.toList() }
+        val preparedKey = sourceKey ?: "queue:${preparedQueue.joinToString(",") { it.id }}"
+        val signature = shuffleSignature(preparedQueue, preparedKey)
+        if (signature != shuffleSessionSignature) {
+            resetShuffleCycle(preparedQueue, track.id, signature)
+        } else if (shuffleEnabled) {
+            shuffleRemainingIds.remove(track.id)
+        }
         recordPlay(track)
-        playbackQueue = queue.ifEmpty { tracks.toList() }
+        playbackQueue = preparedQueue
+        playbackQueueKey = preparedKey
         currentTrack = track
         playbackPositionMs = 0L
         playbackDurationMs = 0L
@@ -1577,6 +1594,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleShuffle() {
         shuffleEnabled = !shuffleEnabled
+        currentTrack?.let { current ->
+            val queue = activePlaybackQueue()
+            resetShuffleCycle(
+                queue,
+                current.id,
+                shuffleSignature(queue, playbackQueueKey)
+            )
+        }
         prefs.edit().putBoolean("shuffle_enabled", shuffleEnabled).apply()
     }
 
@@ -1613,14 +1638,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val queue = activePlaybackQueue()
         if (queue.isEmpty()) return
         if (shuffleEnabled && queue.size > 1) {
-            val candidates = queue.filter { it.id != current.id }
-            play(candidates.random(), queue)
+            ensureShuffleCycle(queue, current.id)
+            if (shuffleRemainingIds.isEmpty()) {
+                resetShuffleCycle(
+                    queue,
+                    current.id,
+                    shuffleSignature(queue, playbackQueueKey)
+                )
+            }
+            val nextId = shuffleRemainingIds.randomOrNull() ?: return
+            val nextTrack = queue.firstOrNull { it.id == nextId } ?: return
+            play(nextTrack, queue, playbackQueueKey)
             return
         }
         val index = queue.indexOfFirst { it.id == current.id }
             .takeIf { it >= 0 }
             ?: 0
-        play(queue[(index + 1).mod(queue.size)], queue)
+        play(queue[(index + 1).mod(queue.size)], queue, playbackQueueKey)
     }
 
     fun previous() {
@@ -1634,7 +1668,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val index = queue.indexOfFirst { it.id == current.id }
             .takeIf { it >= 0 }
             ?: 0
-        play(queue[(index - 1).mod(queue.size)], queue)
+        play(queue[(index - 1).mod(queue.size)], queue, playbackQueueKey)
+    }
+
+    private fun shuffleSignature(queue: List<AudioTrack>, sourceKey: String): String =
+        "$sourceKey|${queue.joinToString(",") { it.id }}"
+
+    private fun resetShuffleCycle(
+        queue: List<AudioTrack>,
+        currentTrackId: String,
+        signature: String
+    ) {
+        shuffleSessionSignature = signature
+        shuffleRemainingIds.clear()
+        shuffleRemainingIds += queue.map { it.id }.distinct().filter { it != currentTrackId }
+    }
+
+    private fun ensureShuffleCycle(queue: List<AudioTrack>, currentTrackId: String) {
+        val signature = shuffleSignature(queue, playbackQueueKey)
+        if (signature != shuffleSessionSignature) {
+            resetShuffleCycle(queue, currentTrackId, signature)
+            return
+        }
+        val availableIds = queue.mapTo(hashSetOf()) { it.id }
+        shuffleRemainingIds.retainAll(availableIds)
+        shuffleRemainingIds.remove(currentTrackId)
     }
 
     private fun activePlaybackQueue(): List<AudioTrack> {
@@ -1732,6 +1790,30 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             playlistOrders[playlist] = playlistOrders[playlist].orEmpty() - id
         }
         track.copy(playlists = next)
+    }
+
+    fun addTracksToPlaylists(trackIds: Set<String>, targetPlaylists: Set<String>) {
+        val validPlaylists = targetPlaylists.filterTo(linkedSetOf()) { it in playlists }
+        if (trackIds.isEmpty() || validPlaylists.isEmpty()) return
+        var changed = 0
+        tracks.indices.forEach { index ->
+            val track = tracks[index]
+            if (track.id !in trackIds) return@forEach
+            val updatedPlaylists = track.playlists + validPlaylists
+            if (updatedPlaylists != track.playlists) {
+                val updated = track.copy(playlists = updatedPlaylists)
+                tracks[index] = updated
+                if (currentTrack?.id == updated.id) currentTrack = updated
+                validPlaylists.forEach { ensurePlaylistOrder(it, updated.id) }
+                changed++
+            }
+        }
+        if (changed > 0) save()
+        Toast.makeText(
+            app,
+            "$changed Song(s) zu ${validPlaylists.size} Playlist(s) hinzugefügt.",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     fun playlistCover(name: String): String? = playlistCovers[name]

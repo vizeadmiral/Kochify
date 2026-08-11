@@ -180,7 +180,7 @@ private fun KochifyTheme(
     mode: KochifyThemeMode,
     content: @Composable () -> Unit
 ) {
-    val rgbAccent = if (mode == KochifyThemeMode.RGB) {
+    val rgbHue = if (mode == KochifyThemeMode.RGB) {
         val rgbTransition = rememberInfiniteTransition(label = "RGB-Farben")
         val hue by rgbTransition.animateFloat(
             initialValue = 0f,
@@ -193,10 +193,13 @@ private fun KochifyTheme(
             ),
             label = "RGB-Akzent"
         )
-        Color.hsv(hue, saturation = 0.78f, value = 1f)
+        hue
     } else {
-        KochifyGreen
+        0f
     }
+    val rgbAccent = Color.hsv(rgbHue, saturation = 0.82f, value = 1f)
+    val rgbSecondary = Color.hsv((rgbHue + 120f) % 360f, 0.82f, 1f)
+    val rgbTertiary = Color.hsv((rgbHue + 240f) % 360f, 0.82f, 1f)
     val colorScheme = when (mode) {
         KochifyThemeMode.BLACK -> darkColorScheme(
             primary = KochifyGreen,
@@ -221,14 +224,64 @@ private fun KochifyTheme(
         KochifyThemeMode.RGB -> darkColorScheme(
             primary = rgbAccent,
             onPrimary = if (rgbAccent.luminance() > 0.42f) Color.Black else Color.White,
-            secondary = Color(0xFFE040FB),
-            tertiary = Color(0xFFFFEA00),
+            primaryContainer = rgbSecondary,
+            onPrimaryContainer = if (rgbSecondary.luminance() > 0.42f) {
+                Color.Black
+            } else {
+                Color.White
+            },
+            secondary = rgbSecondary,
+            onSecondary = if (rgbSecondary.luminance() > 0.42f) Color.Black else Color.White,
+            secondaryContainer = rgbTertiary,
+            onSecondaryContainer = if (rgbTertiary.luminance() > 0.42f) {
+                Color.Black
+            } else {
+                Color.White
+            },
+            tertiary = rgbTertiary,
             background = Color(0xFF090912),
             onBackground = Color.White,
             surface = Color(0xFF151525),
             onSurface = Color.White,
-            surfaceVariant = Color(0xFF24243B),
-            onSurfaceVariant = Color(0xFFD6D2E4)
+            surfaceVariant = Color.hsv((rgbHue + 210f) % 360f, 0.38f, 0.28f),
+            onSurfaceVariant = Color.White,
+            outline = rgbSecondary
+        )
+        KochifyThemeMode.CYBERPUNK -> darkColorScheme(
+            primary = Color(0xFFFCEE09),
+            onPrimary = Color(0xFF101014),
+            primaryContainer = Color(0xFFFCEE09),
+            onPrimaryContainer = Color.Black,
+            secondary = Color(0xFF00F0FF),
+            onSecondary = Color.Black,
+            secondaryContainer = Color(0xFF003B46),
+            onSecondaryContainer = Color(0xFF8EFAFF),
+            tertiary = Color(0xFFFF2A6D),
+            background = Color(0xFF0B0B10),
+            onBackground = Color(0xFFF7F7F7),
+            surface = Color(0xFF202127),
+            onSurface = Color.White,
+            surfaceVariant = Color(0xFF30313A),
+            onSurfaceVariant = Color(0xFFD8D9DF),
+            outline = Color(0xFFFCEE09)
+        )
+        KochifyThemeMode.GERMANY -> darkColorScheme(
+            primary = Color(0xFFDD0000),
+            onPrimary = Color.White,
+            primaryContainer = Color(0xFF7A0000),
+            onPrimaryContainer = Color.White,
+            secondary = Color(0xFFFFCE00),
+            onSecondary = Color.Black,
+            secondaryContainer = Color(0xFFFFCE00),
+            onSecondaryContainer = Color.Black,
+            tertiary = Color.White,
+            background = Color(0xFF070707),
+            onBackground = Color.White,
+            surface = Color(0xFF171717),
+            onSurface = Color.White,
+            surfaceVariant = Color(0xFF2A1A1A),
+            onSurfaceVariant = Color(0xFFFFE7A6),
+            outline = Color(0xFFFFCE00)
         )
     }
     MaterialTheme(colorScheme = colorScheme, content = content)
@@ -245,6 +298,7 @@ private fun MusicApp(vm: MusicViewModel) {
     var showStats by remember { mutableStateOf(false) }
     var showLocalTransfer by remember { mutableStateOf(false) }
     var showBulkCover by remember { mutableStateOf(false) }
+    var showBulkPlaylistAssignment by remember { mutableStateOf(false) }
     var backupIncludesMusic by remember { mutableStateOf(true) }
     var showNewPlaylist by remember { mutableStateOf(false) }
     var showNowPlaying by remember { mutableStateOf(false) }
@@ -265,7 +319,7 @@ private fun MusicApp(vm: MusicViewModel) {
     }
 
     val audioPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetMultipleContents()
+        ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> vm.importAudio(uris) }
     val backupExporter = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip")
@@ -296,6 +350,7 @@ private fun MusicApp(vm: MusicViewModel) {
     val activeTrack = vm.currentTrack
     val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
         showBackup || showStats || showLocalTransfer || showBulkCover || showNewPlaylist ||
+        showBulkPlaylistAssignment ||
         editingTrack != null || playlistTrack != null ||
         renamingPlaylist != null || deletingPlaylist != null ||
         editingPlaylistOrder != null
@@ -394,7 +449,9 @@ private fun MusicApp(vm: MusicViewModel) {
                     mode = mode,
                     playlistName = vm.selectedPlaylist,
                     onBack = { vm.selectedPlaylist = null },
-                    onImport = { audioPicker.launch("audio/*") },
+                    onImport = {
+                        audioPicker.launch(arrayOf("audio/mpeg", "audio/*"))
+                    },
                     onDownload = { showDownload = true },
                     onSpotifyImport = { showSpotifyImport = true },
                     onStats = { showStats = true },
@@ -435,7 +492,14 @@ private fun MusicApp(vm: MusicViewModel) {
                         onEdit = { editingTrack = it },
                         onPlaylist = { playlistTrack = it },
                         playlistName = vm.selectedPlaylist,
+                        queueKey = vm.selectedPlaylist?.let { "playlist:$it" }
+                            ?: when (mode) {
+                                LibraryMode.ALL -> "library"
+                                LibraryMode.FAVORITES -> "favorites"
+                                LibraryMode.PLAYLIST -> "playlists"
+                            },
                         onBulkCover = { showBulkCover = true },
+                        onBulkPlaylist = { showBulkPlaylistAssignment = true },
                         onLocalTransfer = { track ->
                             showLocalTransfer = true
                             vm.startTrackLocalTransfer(track)
@@ -520,6 +584,17 @@ private fun MusicApp(vm: MusicViewModel) {
                 showBulkCover = false
             },
             onDismiss = { showBulkCover = false }
+        )
+    }
+    if (showBulkPlaylistAssignment) {
+        BulkPlaylistAssignmentDialog(
+            tracks = vm.visibleTracks(mode),
+            playlists = vm.playlists,
+            onApply = { trackIds, playlistNames ->
+                vm.addTracksToPlaylists(trackIds, playlistNames)
+                showBulkPlaylistAssignment = false
+            },
+            onDismiss = { showBulkPlaylistAssignment = false }
         )
     }
     if (showNewPlaylist) {
@@ -668,6 +743,14 @@ private fun Header(
                     expanded = toolsExpanded,
                     onDismissRequest = { toolsExpanded = false }
                 ) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Mehrere MP3s vom Handy auswählen") },
+                        leadingIcon = { Icon(Icons.Default.LibraryMusic, null) },
+                        onClick = {
+                            toolsExpanded = false
+                            onImport()
+                        }
+                    )
                     androidx.compose.material3.DropdownMenuItem(
                         text = { Text("Spotify-Playlists importieren") },
                         leadingIcon = { Icon(Icons.Default.Sync, null) },
@@ -891,7 +974,9 @@ private fun TrackList(
     onEdit: (AudioTrack) -> Unit,
     onPlaylist: (AudioTrack) -> Unit,
     playlistName: String?,
+    queueKey: String,
     onBulkCover: () -> Unit,
+    onBulkPlaylist: () -> Unit,
     onLocalTransfer: (AudioTrack) -> Unit
 ) {
     if (tracks.isEmpty()) {
@@ -915,7 +1000,7 @@ private fun TrackList(
     LazyColumn(
         contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)
     ) {
-        item(key = "bulk-cover-action") {
+        item(key = "bulk-actions") {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -928,10 +1013,15 @@ private fun TrackList(
                     fontSize = 12.sp
                 )
                 Spacer(Modifier.weight(1f))
+                TextButton(onClick = onBulkPlaylist) {
+                    Icon(Icons.Default.PlaylistAdd, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Playlists")
+                }
                 TextButton(onClick = onBulkCover) {
                     Icon(Icons.Default.Photo, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Cover mehrfach ändern")
+                    Spacer(Modifier.width(4.dp))
+                    Text("Cover")
                 }
             }
         }
@@ -940,7 +1030,7 @@ private fun TrackList(
                 track = track,
                 isCurrent = vm.currentTrack?.id == track.id,
                 onPlay = {
-                    vm.play(track, tracks)
+                    vm.play(track, tracks, queueKey)
                     onOpenPlayer()
                 },
                 onFavorite = { vm.toggleFavorite(track.id) },
@@ -1897,8 +1987,24 @@ private fun ThemePickerDialog(
                     mode = KochifyThemeMode.RGB,
                     selected = selected == KochifyThemeMode.RGB,
                     title = "RGB",
-                    description = "Langsam wechselnde Farbakzente",
+                    description = "Kräftige wechselnde Farben auf Tasten und Flächen",
                     swatch = Color(0xFFE040FB),
+                    onSelect = onSelect
+                )
+                ThemeOption(
+                    mode = KochifyThemeMode.CYBERPUNK,
+                    selected = selected == KochifyThemeMode.CYBERPUNK,
+                    title = "Cyberpunk",
+                    description = "Neongelb, Cyan und Pink auf dunklem Hintergrund",
+                    swatch = Color(0xFFFCEE09),
+                    onSelect = onSelect
+                )
+                ThemeOption(
+                    mode = KochifyThemeMode.GERMANY,
+                    selected = selected == KochifyThemeMode.GERMANY,
+                    title = "Deutschland",
+                    description = "Schwarz, Rot und Gold",
+                    swatch = Color(0xFFDD0000),
                     onSelect = onSelect
                 )
             }
@@ -2201,6 +2307,157 @@ private fun SpotifyImportDialog(
             TextButton(onClick = onDismiss, enabled = !importing) {
                 Text("Schließen")
             }
+        }
+    )
+}
+
+@Composable
+private fun BulkPlaylistAssignmentDialog(
+    tracks: List<AudioTrack>,
+    playlists: List<String>,
+    onApply: (Set<String>, Set<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedTrackIds by remember(tracks.map { it.id }) {
+        mutableStateOf(emptySet<String>())
+    }
+    var selectedPlaylists by remember(playlists) {
+        mutableStateOf(emptySet<String>())
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Mehrere Songs zu Playlists") },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(440.dp)
+            ) {
+                item {
+                    Text(
+                        "Wähle zuerst mehrere Songs und danach eine oder mehrere Ziel-Playlists.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                selectedTrackIds = tracks.map { it.id }.toSet()
+                            }
+                        ) {
+                            Text("Alle Songs")
+                        }
+                        TextButton(onClick = { selectedTrackIds = emptySet() }) {
+                            Text("Auswahl löschen")
+                        }
+                    }
+                    Text(
+                        "Songs (${selectedTrackIds.size} ausgewählt)",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                items(tracks, key = { "bulk-playlist-track-${it.id}" }) { track ->
+                    val selected = track.id in selectedTrackIds
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selectedTrackIds = if (selected) {
+                                    selectedTrackIds - track.id
+                                } else {
+                                    selectedTrackIds + track.id
+                                }
+                            }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = selected,
+                            onCheckedChange = {
+                                selectedTrackIds = if (selected) {
+                                    selectedTrackIds - track.id
+                                } else {
+                                    selectedTrackIds + track.id
+                                }
+                            }
+                        )
+                        Cover(track.coverPath, 40)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                track.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                track.artist,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+                item {
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                    Text(
+                        "Ziel-Playlists (${selectedPlaylists.size} ausgewählt)",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    if (playlists.isEmpty()) {
+                        Text(
+                            "Erstelle zuerst eine Playlist.",
+                            modifier = Modifier.padding(vertical = 12.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                items(playlists, key = { "bulk-playlist-target-$it" }) { playlist ->
+                    val selected = playlist in selectedPlaylists
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selectedPlaylists = if (selected) {
+                                    selectedPlaylists - playlist
+                                } else {
+                                    selectedPlaylists + playlist
+                                }
+                            }
+                            .padding(vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = selected,
+                            onCheckedChange = {
+                                selectedPlaylists = if (selected) {
+                                    selectedPlaylists - playlist
+                                } else {
+                                    selectedPlaylists + playlist
+                                }
+                            }
+                        )
+                        Icon(Icons.Default.QueueMusic, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(playlist, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onApply(selectedTrackIds, selectedPlaylists) },
+                enabled = selectedTrackIds.isNotEmpty() && selectedPlaylists.isNotEmpty()
+            ) {
+                Text("Hinzufügen")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen") }
         }
     )
 }
