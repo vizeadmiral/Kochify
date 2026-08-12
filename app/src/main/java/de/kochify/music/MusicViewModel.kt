@@ -123,6 +123,12 @@ private data class YoutubeDownloadPlan(
     val thumbnailUrl: String?
 )
 
+private data class PlaybackNavigationEntry(
+    val trackId: String,
+    val queueIds: List<String>,
+    val sourceKey: String
+)
+
 private const val SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 private const val SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 private const val SPOTIFY_API_URL = "https://api.spotify.com/v1"
@@ -174,6 +180,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var playbackQueueKey: String = "library"
     private var shuffleSessionSignature: String? = null
     private val shuffleRemainingIds = mutableListOf<String>()
+    private val playbackBackStack = mutableListOf<PlaybackNavigationEntry>()
     private var activeListeningStartedAt = 0L
     private var transferServer: ServerSocket? = null
 
@@ -1600,9 +1607,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         track: AudioTrack,
         queue: List<AudioTrack> = tracks.toList(),
         sourceKey: String? = null
+    ) = playInternal(
+        track = track,
+        queue = queue,
+        sourceKey = sourceKey,
+        rememberCurrentTrack = true
+    )
+
+    private fun playInternal(
+        track: AudioTrack,
+        queue: List<AudioTrack>,
+        sourceKey: String?,
+        rememberCurrentTrack: Boolean
     ) {
         val preparedQueue = queue.ifEmpty { tracks.toList() }
         val preparedKey = sourceKey ?: "queue:${preparedQueue.joinToString(",") { it.id }}"
+        if (rememberCurrentTrack && currentTrack?.id != track.id) {
+            currentTrack?.let { previousTrack ->
+                playbackBackStack += PlaybackNavigationEntry(
+                    trackId = previousTrack.id,
+                    queueIds = playbackQueue.map { it.id },
+                    sourceKey = playbackQueueKey
+                )
+                if (playbackBackStack.size > 500) playbackBackStack.removeAt(0)
+            }
+        }
         val signature = shuffleSignature(preparedQueue, preparedKey)
         if (signature != shuffleSessionSignature) {
             resetShuffleCycle(preparedQueue, track.id, signature)
@@ -1617,6 +1646,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         playbackDurationMs = 0L
         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(track.path))))
         player.prepare()
+        player.seekTo(0L)
         player.play()
         PlaybackKeepAliveService.start(app, track.title, track.artist)
     }
@@ -1708,17 +1738,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun previous() {
-        val current = currentTrack ?: return
-        if (player.currentPosition > 5_000L) {
-            seekTo(0L)
+        currentTrack ?: return
+        while (playbackBackStack.isNotEmpty()) {
+            val entry = playbackBackStack.removeAt(playbackBackStack.lastIndex)
+            val previousTrack = tracks.firstOrNull { it.id == entry.trackId } ?: continue
+            val restoredQueue = entry.queueIds.mapNotNull { trackId ->
+                tracks.firstOrNull { it.id == trackId }
+            }.ifEmpty { tracks.toList() }
+            playInternal(
+                track = previousTrack,
+                queue = restoredQueue,
+                sourceKey = entry.sourceKey,
+                rememberCurrentTrack = false
+            )
             return
         }
+
         val queue = activePlaybackQueue()
         if (queue.isEmpty()) return
-        val index = queue.indexOfFirst { it.id == current.id }
+        val currentIndex = queue.indexOfFirst { it.id == currentTrack?.id }
             .takeIf { it >= 0 }
             ?: 0
-        play(queue[(index - 1).mod(queue.size)], queue, playbackQueueKey)
+        playInternal(
+            track = queue[(currentIndex - 1).mod(queue.size)],
+            queue = queue,
+            sourceKey = playbackQueueKey,
+            rememberCurrentTrack = false
+        )
     }
 
     private fun shuffleSignature(queue: List<AudioTrack>, sourceKey: String): String =
