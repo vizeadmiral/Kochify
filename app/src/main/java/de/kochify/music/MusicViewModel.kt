@@ -61,6 +61,9 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.text.Normalizer
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 import java.util.UUID
 
 data class AudioTrack(
@@ -70,6 +73,7 @@ data class AudioTrack(
     val path: String,
     val coverPath: String? = null,
     val favorite: Boolean = false,
+    val bookmarked: Boolean = false,
     val playlists: Set<String> = emptySet()
 )
 
@@ -98,6 +102,38 @@ data class PlaybackStats(
     val uniqueTracks: Int,
     val mostPlayed: List<Pair<AudioTrack, Int>>,
     val recent: List<PlaybackHistoryEntry>
+)
+
+data class WrappedSummary(
+    val label: String,
+    val listeningMs: Long,
+    val totalPlays: Int,
+    val uniqueTracks: Int,
+    val topTracks: List<Pair<AudioTrack, Int>>
+)
+
+data class StorageUsage(
+    val totalBytes: Long,
+    val audioBytes: Long,
+    val coverBytes: Long,
+    val cacheBytes: Long,
+    val songCount: Int,
+    val playlistCount: Int
+)
+
+data class TrashTrack(val track: AudioTrack, val deletedAt: Long)
+
+data class TrashPlaylist(
+    val name: String,
+    val coverPath: String?,
+    val memberTrackIds: List<String>,
+    val deletedAt: Long
+)
+
+data class DuplicateCandidate(
+    val token: String,
+    val track: AudioTrack,
+    val existing: AudioTrack
 )
 
 data class LocalTransferOffer(
@@ -179,6 +215,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val spotifyPlaylistLinks = mutableStateMapOf<String, String>()
     val playbackHistory = mutableStateListOf<PlaybackHistoryEntry>()
     private val playCounts = mutableStateMapOf<String, Int>()
+    private val monthlyListeningMs = mutableStateMapOf<String, Long>()
+    private val yearlyListeningMs = mutableStateMapOf<String, Long>()
+    val trashTracks = mutableStateListOf<TrashTrack>()
+    val trashPlaylists = mutableStateListOf<TrashPlaylist>()
+    val pendingDuplicates = mutableStateListOf<DuplicateCandidate>()
     val player = ExoPlayer.Builder(app).build().apply {
         setAudioAttributes(
             AudioAttributes.Builder()
@@ -215,6 +256,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var shuffleEnabled by mutableStateOf(prefs.getBoolean("shuffle_enabled", false))
     var repeatOneEnabled by mutableStateOf(prefs.getBoolean("repeat_one_enabled", false))
+    var playbackSpeed by mutableFloatStateOf(
+        prefs.getFloat("playback_speed", 1f).coerceIn(0.25f, 2f)
+    )
+        private set
     var totalListeningMs by mutableLongStateOf(prefs.getLong("total_listening_ms", 0L))
         private set
     var themeMode by mutableStateOf(
@@ -234,6 +279,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     )
         private set
     var pinEnabled by mutableStateOf(prefs.getBoolean("pin_enabled", false))
+        private set
+    var guestModeEnabled by mutableStateOf(prefs.getBoolean("guest_mode_enabled", false))
+        private set
+    var guestMode by mutableStateOf(false)
         private set
     var appLocked by mutableStateOf(pinEnabled)
         private set
@@ -264,6 +313,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
         player.repeatMode =
             if (repeatOneEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        player.setPlaybackSpeed(playbackSpeed)
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(value: Boolean) {
                 isPlaying = value
@@ -315,7 +365,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportKochifyBackup(uri: Uri, includeMusic: Boolean) {
-        if (isBackupBusy) return
+        if (isBackupBusy || guestMode) return
         val trackSnapshot = tracks.toList()
         val playlistSnapshot = playlists.toList()
         val playlistCoverSnapshot = playlistCovers.toMap()
@@ -323,6 +373,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val shuffleSnapshot = shuffleEnabled
         val repeatSnapshot = repeatOneEnabled
         val librarySortSnapshot = librarySort
+        val speedSnapshot = playbackSpeed
+        val totalListeningSnapshot = currentListeningTotal()
+        val playCountSnapshot = playCounts.toMap()
+        val historySnapshot = playbackHistory.toList()
+        val monthlySnapshot = monthlyListeningMs.toMap()
+        val yearlySnapshot = yearlyListeningMs.toMap()
         isBackupBusy = true
         backupStatus = if (includeMusic) {
             "Komplettsicherung wird erstellt …"
@@ -341,7 +397,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     shuffleEnabled = shuffleSnapshot,
                     repeatOneEnabled = repeatSnapshot,
                     librarySort = librarySortSnapshot,
-                    includeMusic = includeMusic
+                    playbackSpeed = speedSnapshot,
+                    includeMusic = includeMusic,
+                    totalListeningMs = totalListeningSnapshot,
+                    playCounts = playCountSnapshot,
+                    playbackHistory = historySnapshot,
+                    monthlyListeningMs = monthlySnapshot,
+                    yearlyListeningMs = yearlySnapshot
                 )
                 withContext(Dispatchers.Main) {
                     backupStatus = if (includeMusic) {
@@ -487,6 +549,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startPlaylistLocalTransfer(name: String) {
+        if (guestMode) return
         val packageTracks = orderedPlaylistTracks(name)
             .map { it.copy(favorite = false, playlists = setOf(name)) }
         startLocalTransfer(
@@ -501,6 +564,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startTrackLocalTransfer(track: AudioTrack) {
+        if (guestMode) return
         startLocalTransfer(
             title = "Song: ${track.title}",
             fileName = track.title,
@@ -511,6 +575,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startTracksLocalTransfer(trackIds: Set<String>) {
+        if (guestMode) return
         val selectedTracks = tracks
             .filter { it.id in trackIds }
             .map { it.copy(favorite = false, playlists = emptySet()) }
@@ -608,6 +673,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun receiveLocalTransfer(qrPayload: String) {
+        if (guestMode) return
         if (isLocalTransferBusy) return
         isLocalTransferBusy = true
         localTransferStatus = "Verbindung wird hergestellt …"
@@ -700,7 +766,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importKochifyBackup(uri: Uri) {
-        if (isBackupBusy) return
+        if (isBackupBusy || guestMode) return
         isBackupBusy = true
         backupStatus = "Kochify-Sicherung wird importiert …"
         viewModelScope.launch(Dispatchers.IO) {
@@ -721,7 +787,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importAudio(uris: List<Uri>) {
-        if (uris.isEmpty()) return
+        if (uris.isEmpty() || guestMode) return
         viewModelScope.launch(Dispatchers.IO) {
             var imported = 0
             uris.forEach { uri ->
@@ -757,7 +823,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         useYoutubeCovers: Boolean = true,
         customCoverUri: Uri? = null
     ) {
-        if (url.isBlank() || isDownloading) return
+        if (url.isBlank() || isDownloading || guestMode) return
         val cleanUrl = url.trim()
         if (!isYoutubeUrl(cleanUrl)) {
             downloadStatus = "Bitte einen gültigen YouTube- oder YouTube-Music-Link eingeben."
@@ -868,6 +934,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             addOption("--extract-audio")
                             addOption("--audio-format", "mp3")
                             addOption("--audio-quality", "0")
+                            addOption(
+                                "--postprocessor-args",
+                                "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1.5"
+                            )
                             addOption("--embed-metadata")
                             addOption("--embed-thumbnail")
                             addOption("--no-playlist")
@@ -1223,8 +1293,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             shuffleEnabled = shuffle,
             repeatOneEnabled = repeat,
             librarySort = librarySort,
+            playbackSpeed = playbackSpeed,
             includeMusic = true,
-            includeSettings = false
+            includeSettings = false,
+            includeStats = false
         )
         return shareFile
     }
@@ -1386,6 +1458,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startSpotifyImport(clientId: String) {
+        if (guestMode) return
         val cleanClientId = clientId.trim()
         if (cleanClientId.isEmpty()) {
             spotifyStatus = "Bitte zuerst deine Spotify Client-ID eingeben."
@@ -1785,6 +1858,39 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString("library_sort", sort.name).apply()
     }
 
+    fun selectPlaybackSpeed(speed: Float) {
+        playbackSpeed = speed.coerceIn(0.25f, 2f)
+        player.setPlaybackSpeed(playbackSpeed)
+        prefs.edit().putFloat("playback_speed", playbackSpeed).apply()
+    }
+
+    fun toggleBookmark(id: String) {
+        if (guestMode) return
+        update(id) { it.copy(bookmarked = !it.bookmarked) }
+    }
+
+    fun setGuestModeEnabled(enabled: Boolean) {
+        if (enabled && !pinEnabled) return
+        guestModeEnabled = enabled
+        prefs.edit().putBoolean("guest_mode_enabled", enabled).apply()
+        if (!enabled) guestMode = false
+    }
+
+    fun enterGuestMode() {
+        if (!guestModeEnabled) return
+        updateListeningSession(false)
+        guestMode = true
+        appLocked = false
+        backgroundedAtElapsedMs = 0L
+    }
+
+    fun exitGuestMode() {
+        updateListeningSession(false)
+        guestMode = false
+        player.pause()
+        appLocked = pinEnabled
+    }
+
     fun enablePin(pin: String, confirmation: String): String? {
         val validation = validateNewPin(pin, confirmation)
         if (validation != null) return validation
@@ -1811,6 +1917,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .putBoolean("pin_enabled", false)
             .apply()
         pinEnabled = false
+        guestModeEnabled = false
+        guestMode = false
+        prefs.edit().putBoolean("guest_mode_enabled", false).apply()
         appLocked = false
         backgroundedAtElapsedMs = 0L
         return true
@@ -1818,6 +1927,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun unlockWithPin(pin: String): Boolean {
         if (!pinEnabled || verifyPin(pin)) {
+            guestMode = false
             appLocked = false
             backgroundedAtElapsedMs = 0L
             return true
@@ -1888,6 +1998,72 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             mostPlayed = top,
             recent = playbackHistory.take(30)
         )
+    }
+
+    fun wrappedSummary(monthly: Boolean): WrappedSummary {
+        val calendar = Calendar.getInstance()
+        val periodKey = if (monthly) {
+            SimpleDateFormat("yyyy-MM", Locale.GERMANY).format(calendar.time)
+        } else {
+            SimpleDateFormat("yyyy", Locale.GERMANY).format(calendar.time)
+        }
+        if (monthly) {
+            calendar.set(Calendar.DAY_OF_MONTH, 1)
+        } else {
+            calendar.set(Calendar.DAY_OF_YEAR, 1)
+        }
+        calendar.set(Calendar.HOUR_OF_DAY, 0)
+        calendar.set(Calendar.MINUTE, 0)
+        calendar.set(Calendar.SECOND, 0)
+        calendar.set(Calendar.MILLISECOND, 0)
+        val periodEntries = playbackHistory.filter { it.playedAt >= calendar.timeInMillis }
+        val counts = periodEntries.groupingBy { it.trackId }.eachCount()
+        val top = counts.entries
+            .sortedByDescending { it.value }
+            .mapNotNull { (id, count) -> tracks.firstOrNull { it.id == id }?.let { it to count } }
+            .take(5)
+        val currentDelta = if (activeListeningStartedAt > 0L && !guestMode) {
+            (SystemClock.elapsedRealtime() - activeListeningStartedAt).coerceAtLeast(0L)
+        } else 0L
+        val listening = if (monthly) monthlyListeningMs[periodKey] else yearlyListeningMs[periodKey]
+        return WrappedSummary(
+            label = if (monthly) "Dieser Monat" else "Dieses Jahr",
+            listeningMs = (listening ?: 0L) + currentDelta,
+            totalPlays = periodEntries.size,
+            uniqueTracks = counts.size,
+            topTracks = top
+        )
+    }
+
+    fun recommendTrack(): AudioTrack? {
+        if (tracks.isEmpty()) return null
+        val recentIds = playbackHistory.take(10).mapTo(hashSetOf()) { it.trackId }
+        val candidates = tracks.filter { it.id !in recentIds }.ifEmpty { tracks.toList() }
+        val leastPlayed = candidates.sortedBy { playCounts[it.id] ?: 0 }
+        return leastPlayed.take((leastPlayed.size / 2).coerceAtLeast(1)).randomOrNull()
+    }
+
+    fun storageUsage(): StorageUsage {
+        fun size(root: File): Long = if (!root.exists()) 0L else root.walkTopDown()
+            .filter(File::isFile)
+            .sumOf(File::length)
+        val audio = listOf(musicDir, downloadDir).distinctBy { it.absolutePath }.sumOf(::size)
+        val covers = size(coversDir)
+        val cache = size(app.cacheDir)
+        return StorageUsage(
+            totalBytes = audio + covers + cache,
+            audioBytes = audio,
+            coverBytes = covers,
+            cacheBytes = cache,
+            songCount = tracks.size,
+            playlistCount = playlists.size
+        )
+    }
+
+    fun clearCache() {
+        if (guestMode) return
+        app.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+        Toast.makeText(app, "Zwischenspeicher geleert.", Toast.LENGTH_SHORT).show()
     }
 
     fun next() {
@@ -1978,6 +2154,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleFavorite(id: String) = update(id) { it.copy(favorite = !it.favorite) }
 
     fun createPlaylist(name: String) {
+        if (guestMode) return
         val clean = name.trim()
         if (clean.isNotEmpty() && clean !in playlists) {
             playlists.add(clean)
@@ -1987,6 +2164,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun renamePlaylist(oldName: String, newName: String) {
+        if (guestMode) return
         val clean = newName.trim()
         val playlistIndex = playlists.indexOf(oldName)
         if (clean.isEmpty() || playlistIndex < 0 ||
@@ -2023,7 +2201,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deletePlaylist(name: String) {
+        if (guestMode) return
+        val deletedCover = playlistCovers[name]
+        val memberIds = orderedPlaylistTracks(name).map { it.id }
         if (!playlists.remove(name)) return
+        trashPlaylists.removeAll { it.name == name }
+        trashPlaylists.add(
+            0,
+            TrashPlaylist(name, deletedCover, memberIds, System.currentTimeMillis())
+        )
         tracks.indices.forEach { index ->
             val track = tracks[index]
             if (name in track.playlists) {
@@ -2034,9 +2220,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         pendingSpotifyTracks.removeAll { it.playlist == name }
         spotifyPlaylistLinks.remove(name)
-        playlistCovers.remove(name)?.let { path ->
-            if (path.startsWith(coversDir.absolutePath)) File(path).delete()
-        }
+        playlistCovers.remove(name)
         playlistOrders.remove(name)
         if (selectedPlaylist == name) selectedPlaylist = null
         save()
@@ -2066,6 +2250,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addTracksToPlaylists(trackIds: Set<String>, targetPlaylists: Set<String>) {
+        if (guestMode) return
         val validPlaylists = targetPlaylists.filterTo(linkedSetOf()) { it in playlists }
         if (trackIds.isEmpty() || validPlaylists.isEmpty()) return
         var changed = 0
@@ -2096,6 +2281,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     fun setPlaylistCover(name: String, uri: Uri) {
+        if (guestMode) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val target = File(
@@ -2122,6 +2308,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun moveTrackInPlaylist(playlist: String, trackId: String, direction: Int) {
+        if (guestMode) return
         val order = orderedPlaylistTracks(playlist).map { it.id }.toMutableList()
         val from = order.indexOf(trackId)
         if (from < 0) return
@@ -2134,6 +2321,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setPlaylistOrder(playlist: String, orderedTrackIds: List<String>) {
+        if (guestMode) return
         val memberIds = tracks
             .filter { playlist in it.playlists }
             .map { it.id }
@@ -2155,6 +2343,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setCover(id: String, uri: Uri) {
+        if (guestMode) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val target = copyLocalCover(uri, "song-${stableKey(id)}")
@@ -2171,7 +2360,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setCovers(ids: Set<String>, uri: Uri) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || guestMode) return
         viewModelScope.launch(Dispatchers.IO) {
             val copied = ids.associateWith { id ->
                 copyLocalCover(uri, "song-${stableKey(id)}")?.absolutePath
@@ -2198,25 +2387,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteTrack(track: AudioTrack) {
+        if (guestMode) return
         if (currentTrack?.id == track.id) {
             player.stop()
             PlaybackKeepAliveService.stop(app)
             currentTrack = null
         }
         tracks.removeAll { it.id == track.id }
+        trashTracks.removeAll { it.track.id == track.id }
+        trashTracks.add(0, TrashTrack(track, System.currentTimeMillis()))
         playlistOrders.keys.toList().forEach { playlist ->
             playlistOrders[playlist] = playlistOrders[playlist].orEmpty() - track.id
         }
-        if (track.path.startsWith(app.filesDir.absolutePath) ||
-            track.path.startsWith(downloadDir.absolutePath)
-        ) {
-            File(track.path).delete()
-        }
-        track.coverPath?.let { File(it).delete() }
         save()
     }
 
     fun deleteTracks(trackIds: Set<String>) {
+        if (guestMode) return
         val selectedTracks = tracks.filter { it.id in trackIds }
         if (selectedTracks.isEmpty()) return
         if (currentTrack?.id?.let { it in trackIds } == true) {
@@ -2225,31 +2412,90 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             currentTrack = null
         }
         tracks.removeAll { it.id in trackIds }
+        trashTracks.removeAll { it.track.id in trackIds }
+        trashTracks.addAll(0, selectedTracks.map { TrashTrack(it, System.currentTimeMillis()) })
         playlistOrders.keys.toList().forEach { playlist ->
             playlistOrders[playlist] = playlistOrders[playlist].orEmpty()
                 .filterNot { it in trackIds }
         }
-        selectedTracks.forEach { track ->
-            if ((track.path.startsWith(app.filesDir.absolutePath) ||
-                    track.path.startsWith(downloadDir.absolutePath)) &&
-                tracks.none { it.path == track.path }
-            ) {
-                File(track.path).delete()
-            }
-            track.coverPath?.let { coverPath ->
-                if (tracks.none { it.coverPath == coverPath } &&
-                    coverPath !in playlistCovers.values
-                ) {
-                    File(coverPath).delete()
-                }
-            }
-        }
         save()
         Toast.makeText(
             app,
-            "${selectedTracks.size} Song(s) gelöscht.",
+            "${selectedTracks.size} Song(s) in den Papierkorb verschoben.",
             Toast.LENGTH_LONG
         ).show()
+    }
+
+    fun restoreTrashTrack(trackId: String) {
+        if (guestMode) return
+        val entry = trashTracks.firstOrNull { it.track.id == trackId } ?: return
+        if (!File(entry.track.path).isFile) {
+            Toast.makeText(app, "Die Audiodatei ist nicht mehr vorhanden.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val restored = entry.track.copy(
+            playlists = entry.track.playlists.filterTo(linkedSetOf()) { it in playlists }
+        )
+        tracks.add(restored)
+        restored.playlists.forEach { ensurePlaylistOrder(it, restored.id) }
+        trashTracks.remove(entry)
+        save()
+    }
+
+    fun permanentlyDeleteTrashTrack(trackId: String) {
+        if (guestMode) return
+        val entry = trashTracks.firstOrNull { it.track.id == trackId } ?: return
+        trashTracks.remove(entry)
+        val track = entry.track
+        if (tracks.none { it.path == track.path } &&
+            trashTracks.none { it.track.path == track.path } &&
+            (track.path.startsWith(app.filesDir.absolutePath) ||
+                track.path.startsWith(downloadDir.absolutePath))
+        ) File(track.path).delete()
+        track.coverPath?.let { coverPath ->
+            if (tracks.none { it.coverPath == coverPath } &&
+                trashTracks.none { it.track.coverPath == coverPath } &&
+                coverPath !in playlistCovers.values &&
+                trashPlaylists.none { it.coverPath == coverPath }
+            ) File(coverPath).delete()
+        }
+        save()
+    }
+
+    fun restoreTrashPlaylist(name: String) {
+        if (guestMode) return
+        val entry = trashPlaylists.firstOrNull { it.name == name } ?: return
+        val restoredName = generateSequence(name) { previous -> "$previous (wiederhergestellt)" }
+            .first { it !in playlists }
+        playlists.add(restoredName)
+        entry.coverPath?.takeIf { File(it).isFile }?.let { playlistCovers[restoredName] = it }
+        val validIds = entry.memberTrackIds.filter { id -> tracks.any { it.id == id } }
+        playlistOrders[restoredName] = validIds
+        tracks.indices.forEach { index ->
+            if (tracks[index].id in validIds) {
+                tracks[index] = tracks[index].copy(playlists = tracks[index].playlists + restoredName)
+            }
+        }
+        trashPlaylists.remove(entry)
+        save()
+    }
+
+    fun permanentlyDeleteTrashPlaylist(name: String) {
+        if (guestMode) return
+        val entry = trashPlaylists.firstOrNull { it.name == name } ?: return
+        trashPlaylists.remove(entry)
+        entry.coverPath?.let { path ->
+            if (path !in playlistCovers.values && tracks.none { it.coverPath == path }) {
+                File(path).delete()
+            }
+        }
+        save()
+    }
+
+    fun emptyTrash() {
+        if (guestMode) return
+        trashTracks.map { it.track.id }.toList().forEach(::permanentlyDeleteTrashTrack)
+        trashPlaylists.map { it.name }.toList().forEach(::permanentlyDeleteTrashPlaylist)
     }
 
     fun visibleTracks(mode: LibraryMode): List<AudioTrack> {
@@ -2258,6 +2504,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val sectionMatch = when (mode) {
                 LibraryMode.ALL -> true
                 LibraryMode.FAVORITES -> track.favorite
+                LibraryMode.BOOKMARKS -> track.bookmarked
                 LibraryMode.PLAYLIST -> selectedPlaylist in track.playlists
             }
             val searchMatch = query.isBlank() ||
@@ -2303,11 +2550,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val assignedTrack = track.copy(
                     playlists = track.playlists + assignments.map { it.playlist }
                 )
-                pendingSpotifyTracks.removeAll(assignments.toSet())
-                tracks.add(assignedTrack)
-                assignedTrack.playlists.forEach { ensurePlaylistOrder(it, assignedTrack.id) }
-                save()
-                assignedTrack
+                val duplicate = tracks.firstOrNull {
+                    normalized(it.title) == normalized(assignedTrack.title) &&
+                        normalized(it.artist) == normalized(assignedTrack.artist)
+                }
+                if (duplicate != null) {
+                    pendingDuplicates.add(
+                        DuplicateCandidate(UUID.randomUUID().toString(), assignedTrack, duplicate)
+                    )
+                    null
+                } else {
+                    pendingSpotifyTracks.removeAll(assignments.toSet())
+                    commitNewTrack(assignedTrack)
+                }
             } else if (playlistName != null &&
                 playlistName !in tracks[existingIndex].playlists
             ) {
@@ -2324,6 +2579,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     save()
                 }
                 tracks[existingIndex]
+            }
+        }
+    }
+
+    private fun commitNewTrack(track: AudioTrack): AudioTrack {
+        tracks.add(track)
+        track.playlists.forEach { ensurePlaylistOrder(it, track.id) }
+        save()
+        return track
+    }
+
+    fun resolveDuplicate(token: String, addAnyway: Boolean) {
+        if (guestMode) return
+        val candidate = pendingDuplicates.firstOrNull { it.token == token } ?: return
+        pendingDuplicates.remove(candidate)
+        if (addAnyway) {
+            commitNewTrack(candidate.track)
+        } else {
+            val track = candidate.track
+            if (tracks.none { it.path == track.path } &&
+                (track.path.startsWith(app.filesDir.absolutePath) ||
+                    track.path.startsWith(downloadDir.absolutePath))
+            ) File(track.path).delete()
+            track.coverPath?.let { cover ->
+                if (tracks.none { it.coverPath == cover } && cover !in playlistCovers.values) {
+                    File(cover).delete()
+                }
             }
         }
     }
@@ -2347,7 +2629,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun scanDownloadedFiles() {
         viewModelScope.launch(Dispatchers.IO) {
             downloadDir.walkTopDown()
-                .filter { it.isFile && it.extension.equals("mp3", true) }
+                .filter { file ->
+                    file.isFile && file.extension.equals("mp3", true) &&
+                        trashTracks.none { it.track.path == file.absolutePath }
+                }
                 .forEach { addFile(it) }
         }
     }
@@ -2365,6 +2650,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun recordPlay(track: AudioTrack) {
+        if (guestMode) return
         playCounts[track.id] = (playCounts[track.id] ?: 0) + 1
         playbackHistory.add(
             0,
@@ -2375,18 +2661,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 playedAt = System.currentTimeMillis()
             )
         )
-        while (playbackHistory.size > 500) playbackHistory.removeAt(playbackHistory.lastIndex)
+        while (playbackHistory.size > 10_000) {
+            playbackHistory.removeAt(playbackHistory.lastIndex)
+        }
         saveStats()
     }
 
     private fun updateListeningSession(nowPlaying: Boolean) {
         val now = SystemClock.elapsedRealtime()
         if (nowPlaying) {
-            if (activeListeningStartedAt == 0L) activeListeningStartedAt = now
+            if (activeListeningStartedAt == 0L && !guestMode) activeListeningStartedAt = now
         } else if (activeListeningStartedAt > 0L) {
-            totalListeningMs += (now - activeListeningStartedAt).coerceAtLeast(0L)
+            val delta = (now - activeListeningStartedAt).coerceAtLeast(0L)
+            totalListeningMs += delta
+            val wallClock = System.currentTimeMillis()
+            val monthKey = SimpleDateFormat("yyyy-MM", Locale.GERMANY).format(wallClock)
+            val yearKey = SimpleDateFormat("yyyy", Locale.GERMANY).format(wallClock)
+            monthlyListeningMs[monthKey] = (monthlyListeningMs[monthKey] ?: 0L) + delta
+            yearlyListeningMs[yearKey] = (yearlyListeningMs[yearKey] ?: 0L) + delta
             activeListeningStartedAt = 0L
-            prefs.edit().putLong("total_listening_ms", totalListeningMs).apply()
+            saveStats()
         }
     }
 
@@ -2399,6 +2693,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun saveStats() {
         prefs.edit()
+            .putLong("total_listening_ms", totalListeningMs)
             .putString(
                 "play_counts",
                 JSONObject().apply {
@@ -2418,6 +2713,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.toString()
             )
+            .putString(
+                "monthly_listening_ms",
+                JSONObject().apply {
+                    monthlyListeningMs.forEach { (period, value) -> put(period, value) }
+                }.toString()
+            )
+            .putString(
+                "yearly_listening_ms",
+                JSONObject().apply {
+                    yearlyListeningMs.forEach { (period, value) -> put(period, value) }
+                }.toString()
+            )
             .apply()
     }
 
@@ -2432,6 +2739,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         var restoredTracks = 0
         var matchedTracks = 0
         var missingTracks = 0
+        val restoredIdMap = mutableMapOf<String, String>()
         imported.tracks.forEach { backupTrack ->
             val existingIndex = tracks.indexOfFirst {
                 spotifyMatches(
@@ -2445,6 +2753,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val existing = tracks[existingIndex]
                 val updated = existing.copy(
                     favorite = existing.favorite || backupTrack.favorite,
+                    bookmarked = existing.bookmarked || backupTrack.bookmarked,
                     playlists = existing.playlists + backupTrack.playlists,
                     coverPath = backupTrack.coverPath ?: existing.coverPath
                 )
@@ -2461,6 +2770,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     path = backupTrack.audioPath,
                     coverPath = backupTrack.coverPath,
                     favorite = backupTrack.favorite,
+                    bookmarked = backupTrack.bookmarked,
                     playlists = backupTrack.playlists
                 )
                 tracks.add(restored)
@@ -2474,6 +2784,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             resultingTrack?.playlists?.forEach { playlist ->
                 ensurePlaylistOrder(playlist, resultingTrack.id)
             }
+            resultingTrack?.let { restoredIdMap[backupTrack.sourceId] = it.id }
         }
 
         if (imported.includeSettings) {
@@ -2481,6 +2792,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             shuffleEnabled = imported.shuffleEnabled
             repeatOneEnabled = imported.repeatOneEnabled
             librarySort = imported.librarySort
+            playbackSpeed = imported.playbackSpeed.coerceIn(0.25f, 2f)
+            player.setPlaybackSpeed(playbackSpeed)
             player.repeatMode = if (repeatOneEnabled) {
                 Player.REPEAT_MODE_ONE
             } else {
@@ -2491,7 +2804,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 .putBoolean("shuffle_enabled", shuffleEnabled)
                 .putBoolean("repeat_one_enabled", repeatOneEnabled)
                 .putString("library_sort", librarySort.name)
+                .putFloat("playback_speed", playbackSpeed)
                 .apply()
+        }
+        if (imported.includeStats) {
+            totalListeningMs = maxOf(totalListeningMs, imported.totalListeningMs)
+            imported.playCounts.forEach { (sourceId, count) ->
+                val localId = restoredIdMap[sourceId] ?: sourceId
+                playCounts[localId] = maxOf(playCounts[localId] ?: 0, count)
+            }
+            val knownHistory = playbackHistory.mapTo(hashSetOf()) {
+                "${it.trackId}:${it.playedAt}"
+            }
+            imported.playbackHistory.forEach { entry ->
+                val mapped = entry.copy(trackId = restoredIdMap[entry.trackId] ?: entry.trackId)
+                if (knownHistory.add("${mapped.trackId}:${mapped.playedAt}")) {
+                    playbackHistory.add(mapped)
+                }
+            }
+            playbackHistory.sortByDescending { it.playedAt }
+            while (playbackHistory.size > 10_000) {
+                playbackHistory.removeAt(playbackHistory.lastIndex)
+            }
+            imported.monthlyListeningMs.forEach { (period, value) ->
+                monthlyListeningMs[period] = maxOf(monthlyListeningMs[period] ?: 0L, value)
+            }
+            imported.yearlyListeningMs.forEach { (period, value) ->
+                yearlyListeningMs[period] = maxOf(yearlyListeningMs[period] ?: 0L, value)
+            }
+            saveStats()
         }
         save()
         return buildString {
@@ -2505,11 +2846,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (imported.restoredPlaylistCovers > 0) {
                 append(", ${imported.restoredPlaylistCovers} Playlistbilder")
             }
+            if (imported.includeStats) append(", Statistiken übernommen")
             append(".")
         }
     }
 
     private fun update(id: String, transform: (AudioTrack) -> AudioTrack) {
+        if (guestMode) return
         val index = tracks.indexOfFirst { it.id == id }
         if (index >= 0) {
             val updated = transform(tracks[index])
@@ -2540,6 +2883,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     path = item.getString("path"),
                     coverPath = item.optString("coverPath").takeIf { it.isNotBlank() },
                     favorite = item.optBoolean("favorite"),
+                    bookmarked = item.optBoolean("bookmarked"),
                     playlists = trackPlaylists
                 )
                 if (File(track.path).exists()) tracks.add(track)
@@ -2606,7 +2950,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val storedHistory = JSONArray(prefs.getString("playback_history", "[]"))
-            repeat(minOf(storedHistory.length(), 500)) { index ->
+            repeat(minOf(storedHistory.length(), 10_000)) { index ->
                 val item = storedHistory.optJSONObject(index) ?: return@repeat
                 playbackHistory.add(
                     PlaybackHistoryEntry(
@@ -2616,6 +2960,64 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             "Unbekannter Interpret"
                         },
                         playedAt = item.optLong("playedAt")
+                    )
+                )
+            }
+
+            fun loadLongMap(prefName: String, target: MutableMap<String, Long>) {
+                val stored = JSONObject(
+                    prefs.getString(prefName, "{}").orEmpty().ifBlank { "{}" }
+                )
+                val keys = stored.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    stored.optLong(key).takeIf { it > 0L }?.let { target[key] = it }
+                }
+            }
+            loadLongMap("monthly_listening_ms", monthlyListeningMs)
+            loadLongMap("yearly_listening_ms", yearlyListeningMs)
+
+            val storedTrashTracks = JSONArray(prefs.getString("trash_tracks", "[]"))
+            repeat(storedTrashTracks.length()) { index ->
+                val entry = storedTrashTracks.optJSONObject(index) ?: return@repeat
+                val item = entry.optJSONObject("track") ?: return@repeat
+                val playlistArray = item.optJSONArray("playlists") ?: JSONArray()
+                val deletedTrack = AudioTrack(
+                    id = item.optString("id"),
+                    title = item.optString("title").ifBlank { "Unbekannter Titel" },
+                    artist = item.optString("artist").ifBlank { "Unbekannter Interpret" },
+                    path = item.optString("path"),
+                    coverPath = item.optString("coverPath").takeIf { it.isNotBlank() },
+                    favorite = item.optBoolean("favorite"),
+                    bookmarked = item.optBoolean("bookmarked"),
+                    playlists = buildSet {
+                        repeat(playlistArray.length()) { playlistIndex ->
+                            playlistArray.optString(playlistIndex)
+                                .takeIf { it.isNotBlank() }
+                                ?.let(::add)
+                        }
+                    }
+                )
+                if (deletedTrack.path.isNotBlank()) {
+                    trashTracks.add(TrashTrack(deletedTrack, entry.optLong("deletedAt")))
+                }
+            }
+            val storedTrashPlaylists = JSONArray(prefs.getString("trash_playlists", "[]"))
+            repeat(storedTrashPlaylists.length()) { index ->
+                val item = storedTrashPlaylists.optJSONObject(index) ?: return@repeat
+                val members = item.optJSONArray("memberTrackIds") ?: JSONArray()
+                trashPlaylists.add(
+                    TrashPlaylist(
+                        name = item.optString("name"),
+                        coverPath = item.optString("coverPath").takeIf { it.isNotBlank() },
+                        memberTrackIds = buildList {
+                            repeat(members.length()) { memberIndex ->
+                                members.optString(memberIndex)
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let(::add)
+                            }
+                        },
+                        deletedAt = item.optLong("deletedAt")
                     )
                 )
             }
@@ -2638,6 +3040,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 put("path", track.path)
                 put("coverPath", track.coverPath ?: "")
                 put("favorite", track.favorite)
+                put("bookmarked", track.bookmarked)
                 put("playlists", JSONArray(track.playlists.toList()))
             })
         }
@@ -2676,6 +3079,39 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     spotifyPlaylistLinks.forEach { (name, url) -> put(name, url) }
                 }.toString()
             )
+            .putString(
+                "trash_tracks",
+                JSONArray().apply {
+                    trashTracks.forEach { entry ->
+                        put(JSONObject().apply {
+                            put("deletedAt", entry.deletedAt)
+                            put("track", JSONObject().apply {
+                                put("id", entry.track.id)
+                                put("title", entry.track.title)
+                                put("artist", entry.track.artist)
+                                put("path", entry.track.path)
+                                put("coverPath", entry.track.coverPath ?: "")
+                                put("favorite", entry.track.favorite)
+                                put("bookmarked", entry.track.bookmarked)
+                                put("playlists", JSONArray(entry.track.playlists.toList()))
+                            })
+                        })
+                    }
+                }.toString()
+            )
+            .putString(
+                "trash_playlists",
+                JSONArray().apply {
+                    trashPlaylists.forEach { entry ->
+                        put(JSONObject().apply {
+                            put("name", entry.name)
+                            put("coverPath", entry.coverPath ?: "")
+                            put("memberTrackIds", JSONArray(entry.memberTrackIds))
+                            put("deletedAt", entry.deletedAt)
+                        })
+                    }
+                }.toString()
+            )
             .apply()
     }
 
@@ -2691,4 +3127,4 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
-enum class LibraryMode { ALL, FAVORITES, PLAYLIST }
+enum class LibraryMode { ALL, FAVORITES, BOOKMARKS, PLAYLIST }

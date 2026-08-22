@@ -8,6 +8,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,7 +53,10 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Edit
@@ -85,6 +89,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -321,6 +326,10 @@ private fun MusicApp(vm: MusicViewModel) {
     var showSecurity by remember { mutableStateOf(false) }
     var showBackup by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
+    var showWrapped by remember { mutableStateOf(false) }
+    var showStorage by remember { mutableStateOf(false) }
+    var showTrash by remember { mutableStateOf(false) }
+    var recommendedTrack by remember { mutableStateOf<AudioTrack?>(null) }
     var showLocalTransfer by remember { mutableStateOf(false) }
     var showBulkCover by remember { mutableStateOf(false) }
     var showBulkPlaylistAssignment by remember { mutableStateOf(false) }
@@ -379,7 +388,9 @@ private fun MusicApp(vm: MusicViewModel) {
     val activeTrack = vm.currentTrack
     val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
         showLibrarySort || showSecurity ||
-        showBackup || showStats || showLocalTransfer || showBulkCover || showNewPlaylist ||
+        showBackup || showStats || showWrapped || showStorage || showTrash ||
+        recommendedTrack != null || vm.pendingDuplicates.isNotEmpty() ||
+        showLocalTransfer || showBulkCover || showNewPlaylist ||
         showBulkPlaylistAssignment ||
         editingTrack != null || playlistTrack != null ||
         renamingPlaylist != null || deletingPlaylist != null ||
@@ -414,7 +425,8 @@ private fun MusicApp(vm: MusicViewModel) {
             onDelete = {
                 vm.deleteTrack(activeTrack)
                 showNowPlaying = false
-            }
+            },
+            readOnly = vm.guestMode
         )
     } else {
         Scaffold(
@@ -461,13 +473,15 @@ private fun MusicApp(vm: MusicViewModel) {
                         )
                         NavigationBarItem(
                             selected = false,
-                            onClick = { showThemePicker = true },
+                            onClick = { if (!vm.guestMode) showThemePicker = true },
+                            enabled = !vm.guestMode,
                             icon = { Icon(Icons.Default.Palette, null) },
                             label = { BottomNavigationLabel("Design") }
                         )
                         NavigationBarItem(
                             selected = false,
-                            onClick = { showBackup = true },
+                            onClick = { if (!vm.guestMode) showBackup = true },
+                            enabled = !vm.guestMode,
                             icon = { Icon(Icons.Default.SettingsBackupRestore, null) },
                             label = { BottomNavigationLabel("Sicherung") }
                         )
@@ -494,6 +508,15 @@ private fun MusicApp(vm: MusicViewModel) {
                     onDownload = { showDownload = true },
                     onSpotifyImport = { showSpotifyImport = true },
                     onStats = { showStats = true },
+                    onWrapped = { showWrapped = true },
+                    onStorage = { showStorage = true },
+                    onTrash = { showTrash = true },
+                    onBookmarks = {
+                        selectedTrackIds = emptySet()
+                        mode = LibraryMode.BOOKMARKS
+                        vm.selectedPlaylist = null
+                    },
+                    onRecommend = { recommendedTrack = vm.recommendTrack() },
                     onSort = { showLibrarySort = true },
                     onSecurity = { showSecurity = true },
                     onLocalTransfer = {
@@ -501,7 +524,9 @@ private fun MusicApp(vm: MusicViewModel) {
                     },
                     onSharePlaylist = vm::sharePlaylist,
                     onEditPlaylist = { editingPlaylistOrder = it },
-                    onNewPlaylist = { showNewPlaylist = true }
+                    onNewPlaylist = { showNewPlaylist = true },
+                    guestMode = vm.guestMode,
+                    onExitGuest = vm::exitGuestMode
                 )
                 SearchField(vm)
 
@@ -526,7 +551,8 @@ private fun MusicApp(vm: MusicViewModel) {
                             vm.startPlaylistLocalTransfer(playlist)
                         },
                         onRename = { renamingPlaylist = it },
-                        onDelete = { deletingPlaylist = it }
+                        onDelete = { deletingPlaylist = it },
+                        readOnly = vm.guestMode
                     )
                 } else {
                     TrackList(
@@ -540,6 +566,7 @@ private fun MusicApp(vm: MusicViewModel) {
                             ?: when (mode) {
                                 LibraryMode.ALL -> "library"
                                 LibraryMode.FAVORITES -> "favorites"
+                                LibraryMode.BOOKMARKS -> "bookmarks"
                                 LibraryMode.PLAYLIST -> "playlists"
                             },
                         onBulkCover = { showBulkCover = true },
@@ -567,7 +594,8 @@ private fun MusicApp(vm: MusicViewModel) {
                         onLocalTransfer = { track ->
                             showLocalTransfer = true
                             vm.startTrackLocalTransfer(track)
-                        }
+                        },
+                        readOnly = vm.guestMode
                     )
                 }
             }
@@ -645,6 +673,43 @@ private fun MusicApp(vm: MusicViewModel) {
         StatsDialog(
             stats = vm.playbackStats(),
             onDismiss = { showStats = false }
+        )
+    }
+    if (showWrapped) {
+        WrappedDialog(
+            vm = vm,
+            onDismiss = { showWrapped = false }
+        )
+    }
+    if (showStorage) {
+        StorageDialog(
+            vm = vm,
+            onDismiss = { showStorage = false }
+        )
+    }
+    if (showTrash) {
+        TrashDialog(
+            vm = vm,
+            onDismiss = { showTrash = false }
+        )
+    }
+    recommendedTrack?.let { track ->
+        RecommendationDialog(
+            track = track,
+            onAgain = { recommendedTrack = vm.recommendTrack() },
+            onPlay = {
+                vm.play(track, vm.tracks.toList(), "recommendation")
+                recommendedTrack = null
+                showNowPlaying = true
+            },
+            onDismiss = { recommendedTrack = null }
+        )
+    }
+    vm.pendingDuplicates.firstOrNull()?.let { duplicate ->
+        DuplicateSongDialog(
+            candidate = duplicate,
+            onAdd = { vm.resolveDuplicate(duplicate.token, true) },
+            onSkip = { vm.resolveDuplicate(duplicate.token, false) }
         )
     }
     if (showLocalTransfer) {
@@ -788,12 +853,19 @@ private fun Header(
     onDownload: () -> Unit,
     onSpotifyImport: () -> Unit,
     onStats: () -> Unit,
+    onWrapped: () -> Unit,
+    onStorage: () -> Unit,
+    onTrash: () -> Unit,
+    onBookmarks: () -> Unit,
+    onRecommend: () -> Unit,
     onSort: () -> Unit,
     onSecurity: () -> Unit,
     onLocalTransfer: () -> Unit,
     onSharePlaylist: (String) -> Unit,
     onEditPlaylist: (String) -> Unit,
-    onNewPlaylist: () -> Unit
+    onNewPlaylist: () -> Unit,
+    guestMode: Boolean,
+    onExitGuest: () -> Unit
 ) {
     var toolsExpanded by remember { mutableStateOf(false) }
     Row(
@@ -812,6 +884,7 @@ private fun Header(
                 text = playlistName ?: when (mode) {
                     LibraryMode.ALL -> "Kochify"
                     LibraryMode.FAVORITES -> "Deine Favoriten"
+                    LibraryMode.BOOKMARKS -> "Deine Lesezeichen"
                     LibraryMode.PLAYLIST -> "Deine Playlists"
                 },
                 fontSize = 24.sp,
@@ -819,13 +892,13 @@ private fun Header(
             )
             if (playlistName == null && mode == LibraryMode.ALL) {
                 Text(
-                    text = "Version ${BuildConfig.VERSION_NAME}",
+                    text = if (guestMode) "Gastmodus" else "Version ${BuildConfig.VERSION_NAME}",
                     fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
-        if (playlistName != null) {
+        if (playlistName != null && !guestMode) {
             IconButton(onClick = { onEditPlaylist(playlistName) }) {
                 Icon(
                     Icons.Default.Edit,
@@ -842,18 +915,27 @@ private fun Header(
             }
         }
         if (playlistName == null) {
-            IconButton(onClick = onImport) {
-                Icon(Icons.Default.Add, "MP3 importieren")
+            if (!guestMode) {
+                IconButton(onClick = onImport) {
+                    Icon(Icons.Default.Add, "MP3 importieren")
+                }
+                IconButton(onClick = onDownload) {
+                    Icon(
+                        Icons.Default.Download,
+                        "Link herunterladen",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                IconButton(onClick = onNewPlaylist) {
+                    Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
+                }
             }
-            IconButton(onClick = onDownload) {
+            IconButton(onClick = onRecommend) {
                 Icon(
-                    Icons.Default.Download,
-                    "Link herunterladen",
+                    Icons.Default.Shuffle,
+                    "Was soll ich hören?",
                     tint = MaterialTheme.colorScheme.primary
                 )
-            }
-            IconButton(onClick = onNewPlaylist) {
-                Icon(Icons.Default.PlaylistAdd, "Playlist erstellen")
             }
             Box {
                 IconButton(onClick = { toolsExpanded = true }) {
@@ -863,7 +945,7 @@ private fun Header(
                     expanded = toolsExpanded,
                     onDismissRequest = { toolsExpanded = false }
                 ) {
-                    if (mode == LibraryMode.ALL) {
+                    if (mode == LibraryMode.ALL && !guestMode) {
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("Bibliothek sortieren") },
                             leadingIcon = { Icon(Icons.Default.Sort, null) },
@@ -873,6 +955,24 @@ private fun Header(
                             }
                         )
                     }
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Was soll ich hören?") },
+                        leadingIcon = { Icon(Icons.Default.Shuffle, null) },
+                        onClick = { toolsExpanded = false; onRecommend() }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Lesezeichen") },
+                        leadingIcon = { Icon(Icons.Default.Bookmark, null) },
+                        onClick = { toolsExpanded = false; onBookmarks() }
+                    )
+                    if (guestMode) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Gastmodus beenden") },
+                            leadingIcon = { Icon(Icons.Default.LockOpen, null) },
+                            onClick = { toolsExpanded = false; onExitGuest() }
+                        )
+                    }
+                    if (!guestMode) {
                     androidx.compose.material3.DropdownMenuItem(
                         text = { Text("Mehrere MP3s vom Handy auswählen") },
                         leadingIcon = { Icon(Icons.Default.LibraryMusic, null) },
@@ -898,6 +998,21 @@ private fun Header(
                         }
                     )
                     androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Kochify Wrapped") },
+                        leadingIcon = { Icon(Icons.Default.BarChart, null) },
+                        onClick = { toolsExpanded = false; onWrapped() }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Speicherverwaltung") },
+                        leadingIcon = { Icon(Icons.Default.Storage, null) },
+                        onClick = { toolsExpanded = false; onStorage() }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Papierkorb") },
+                        leadingIcon = { Icon(Icons.Default.Delete, null) },
+                        onClick = { toolsExpanded = false; onTrash() }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
                         text = { Text("Lokale QR-Übertragung") },
                         leadingIcon = { Icon(Icons.Default.QrCodeScanner, null) },
                         onClick = {
@@ -913,6 +1028,7 @@ private fun Header(
                             onSecurity()
                         }
                     )
+                    }
                 }
             }
         }
@@ -1122,7 +1238,8 @@ private fun TrackList(
     onDeleteSelected: (Set<String>) -> Unit,
     onShareSelected: (Set<String>) -> Unit,
     onTransferSelected: (Set<String>) -> Unit,
-    onLocalTransfer: (AudioTrack) -> Unit
+    onLocalTransfer: (AudioTrack) -> Unit,
+    readOnly: Boolean
 ) {
     var selectionActionsExpanded by remember { mutableStateOf(false) }
     if (tracks.isEmpty()) {
@@ -1151,7 +1268,7 @@ private fun TrackList(
                 .padding(horizontal = 16.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (selectedTrackIds.isNotEmpty()) {
+            if (selectedTrackIds.isNotEmpty() && !readOnly) {
                 IconButton(onClick = { onSelectionChange(emptySet()) }) {
                     Icon(Icons.Default.Close, "Auswahl beenden")
                 }
@@ -1220,7 +1337,7 @@ private fun TrackList(
                         )
                     }
                 }
-            } else {
+            } else if (!readOnly) {
                 Text(
                     "${tracks.size} Song${if (tracks.size == 1) "" else "s"}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1259,13 +1376,14 @@ private fun TrackList(
                     )
                 },
                 onLongPress = {
-                    onSelectionChange(selectedTrackIds + track.id)
+                    if (!readOnly) onSelectionChange(selectedTrackIds + track.id)
                 },
                 onPlay = {
                     vm.play(track, tracks, queueKey)
                     onOpenPlayer()
                 },
                 onFavorite = { vm.toggleFavorite(track.id) },
+                onBookmark = { vm.toggleBookmark(track.id) },
                 onEdit = { onEdit(track) },
                 onPlaylist = { onPlaylist(track) },
                 onShare = { vm.shareTrack(track) },
@@ -1276,7 +1394,8 @@ private fun TrackList(
                 onMoveDown = playlistName?.let {
                     { vm.moveTrackInPlaylist(it, track.id, 1) }
                 },
-                onDelete = { vm.deleteTrack(track) }
+                onDelete = { vm.deleteTrack(track) },
+                readOnly = readOnly
                 )
             }
         }
@@ -1294,13 +1413,15 @@ private fun TrackRow(
     onLongPress: () -> Unit,
     onPlay: () -> Unit,
     onFavorite: () -> Unit,
+    onBookmark: () -> Unit,
     onEdit: () -> Unit,
     onPlaylist: () -> Unit,
     onShare: () -> Unit,
     onLocalTransfer: () -> Unit,
     onMoveUp: (() -> Unit)?,
     onMoveDown: (() -> Unit)?,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    readOnly: Boolean
 ) {
     var expanded by remember { mutableStateOf(false) }
     Row(
@@ -1315,9 +1436,9 @@ private fun TrackRow(
             )
             .combinedClickable(
                 onClick = {
-                    if (selectionMode) onToggleSelection() else onPlay()
+                    if (selectionMode && !readOnly) onToggleSelection() else onPlay()
                 },
-                onLongClick = onLongPress
+                onLongClick = { if (!readOnly) onLongPress() }
             )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1344,12 +1465,12 @@ private fun TrackRow(
                 fontSize = 13.sp
             )
         }
-        if (selectionMode) {
+        if (selectionMode && !readOnly) {
             Checkbox(
                 checked = selected,
                 onCheckedChange = { onToggleSelection() }
             )
-        } else {
+        } else if (!readOnly) {
             IconButton(onClick = onFavorite) {
                 Icon(
                     if (track.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
@@ -1369,6 +1490,18 @@ private fun TrackRow(
                     expanded = expanded,
                     onDismissRequest = { expanded = false }
                 ) {
+                androidx.compose.material3.DropdownMenuItem(
+                    text = {
+                        Text(if (track.bookmarked) "Lesezeichen entfernen" else "Lesezeichen setzen")
+                    },
+                    leadingIcon = {
+                        Icon(
+                            if (track.bookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                            null
+                        )
+                    },
+                    onClick = { expanded = false; onBookmark() }
+                )
                 androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Titel und Cover bearbeiten") },
                     leadingIcon = { Icon(Icons.Default.Edit, null) },
@@ -1426,10 +1559,11 @@ private fun PlaylistList(
     onCover: (String) -> Unit,
     onLocalTransfer: (String) -> Unit,
     onRename: (String) -> Unit,
-    onDelete: (String) -> Unit
+    onDelete: (String) -> Unit,
+    readOnly: Boolean
 ) {
     LazyColumn(contentPadding = PaddingValues(16.dp)) {
-        item {
+        if (!readOnly) item {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1476,7 +1610,7 @@ private fun PlaylistList(
                         )
                     }
                 }
-                Box {
+                if (!readOnly) Box {
                     IconButton(onClick = { expanded = true }) {
                         Icon(Icons.Default.MoreVert, "Playlist-Optionen")
                     }
@@ -1599,9 +1733,11 @@ private fun NowPlayingScreen(
     onClose: () -> Unit,
     onEdit: () -> Unit,
     onPlaylist: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    readOnly: Boolean
 ) {
     var expanded by remember(track.id) { mutableStateOf(false) }
+    var showSpeed by remember { mutableStateOf(false) }
     var draggedPosition by remember(track.id) { mutableStateOf<Float?>(null) }
     val duration = vm.playbackDurationMs.coerceAtLeast(1L).toFloat()
     val shownPosition = (draggedPosition ?: vm.playbackPositionMs.toFloat())
@@ -1654,7 +1790,7 @@ private fun NowPlayingScreen(
                             textAlign = TextAlign.Center
                         )
                     }
-                    Box {
+                    if (!readOnly) Box {
                         IconButton(onClick = { expanded = true }) {
                             Icon(Icons.Default.MoreVert, "Songoptionen")
                         }
@@ -1662,6 +1798,25 @@ private fun NowPlayingScreen(
                             expanded = expanded,
                             onDismissRequest = { expanded = false }
                         ) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (track.bookmarked) "Lesezeichen entfernen"
+                                        else "Lesezeichen setzen"
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (track.bookmarked) Icons.Default.Bookmark
+                                        else Icons.Default.BookmarkBorder,
+                                        null
+                                    )
+                                },
+                                onClick = {
+                                    expanded = false
+                                    vm.toggleBookmark(track.id)
+                                }
+                            )
                             androidx.compose.material3.DropdownMenuItem(
                                 text = {
                                     Text(
@@ -1747,7 +1902,7 @@ private fun NowPlayingScreen(
                             fontSize = 16.sp
                         )
                     }
-                    IconButton(onClick = { vm.toggleFavorite(track.id) }) {
+                    if (!readOnly) IconButton(onClick = { vm.toggleFavorite(track.id) }) {
                         Icon(
                             if (track.favorite) {
                                 Icons.Default.Favorite
@@ -1869,9 +2024,16 @@ private fun NowPlayingScreen(
                     }
                 }
 
+                TextButton(
+                    onClick = { showSpeed = true },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                ) {
+                    Text("Geschwindigkeit ${formatSpeed(vm.playbackSpeed)}×")
+                }
+
                 Spacer(Modifier.height(20.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Row(
+                if (!readOnly) Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
@@ -1889,6 +2051,13 @@ private fun NowPlayingScreen(
                 Spacer(Modifier.height(20.dp))
             }
         }
+    }
+    if (showSpeed) {
+        PlaybackSpeedDialog(
+            selected = vm.playbackSpeed,
+            onSelect = vm::selectPlaybackSpeed,
+            onDismiss = { showSpeed = false }
+        )
     }
 }
 
@@ -1934,6 +2103,25 @@ private fun formatPlaybackTime(milliseconds: Long): String {
         "%d:%02d:%02d".format(hours, minutes, seconds)
     } else {
         "%d:%02d".format(minutes, seconds)
+    }
+}
+
+private fun formatSpeed(speed: Float): String = if (speed % 1f == 0f) {
+    speed.toInt().toString()
+} else {
+    speed.toString().replace('.', ',')
+}
+
+private fun formatBytes(bytes: Long): String {
+    val safe = bytes.coerceAtLeast(0L).toDouble()
+    return when {
+        safe >= 1024.0 * 1024.0 * 1024.0 ->
+            String.format(java.util.Locale.GERMANY, "%.2f GB", safe / 1024.0 / 1024.0 / 1024.0)
+        safe >= 1024.0 * 1024.0 ->
+            String.format(java.util.Locale.GERMANY, "%.1f MB", safe / 1024.0 / 1024.0)
+        safe >= 1024.0 ->
+            String.format(java.util.Locale.GERMANY, "%.1f KB", safe / 1024.0)
+        else -> "${safe.toLong()} B"
     }
 }
 
@@ -2095,6 +2283,296 @@ private fun StatsDialog(
         confirmButton = {
             Button(onClick = onDismiss) { Text("Schließen") }
         }
+    )
+}
+
+@Composable
+private fun WrappedDialog(vm: MusicViewModel, onDismiss: () -> Unit) {
+    var monthly by remember { mutableStateOf(true) }
+    val summary = vm.wrappedSummary(monthly)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Kochify Wrapped") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    Button(onClick = { monthly = true }, enabled = !monthly) { Text("Monat") }
+                    Button(onClick = { monthly = false }, enabled = monthly) { Text("Jahr") }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text(summary.label, fontWeight = FontWeight.Bold)
+                Text(
+                    formatListeningTime(summary.listeningMs),
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Black,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    "${summary.totalPlays} Wiedergaben · ${summary.uniqueTracks} Songs",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(16.dp))
+                Text("Deine Top-Songs", fontWeight = FontWeight.Bold)
+                if (summary.topTracks.isEmpty()) {
+                    Text(
+                        "In diesem Zeitraum wurde noch nichts gehört.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                summary.topTracks.forEachIndexed { index, (track, count) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("${index + 1}.", modifier = Modifier.width(26.dp))
+                        Cover(track.coverPath, 42)
+                        Spacer(Modifier.width(9.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                track.artist,
+                                maxLines = 1,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text("$count×", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onDismiss) { Text("Schließen") } }
+    )
+}
+
+@Composable
+private fun StorageDialog(vm: MusicViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var refresh by remember { mutableStateOf(0) }
+    val usage = remember(refresh, vm.tracks.size, vm.playlists.size) { vm.storageUsage() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Speicherverwaltung") },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    formatBytes(usage.totalBytes),
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Black,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text("von Kochify verwendet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(14.dp))
+                StorageLine("Musik (${usage.songCount} Songs)", usage.audioBytes)
+                StorageLine("Cover", usage.coverBytes)
+                StorageLine("Zwischenspeicher", usage.cacheBytes)
+                StorageLine("Playlists", usage.playlistCount.toLong(), "")
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = {
+                        vm.clearCache()
+                        refresh++
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Zwischenspeicher leeren") }
+                TextButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:${context.packageName}")
+                            )
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Android-Speichereinstellungen öffnen") }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Schließen") } }
+    )
+}
+
+@Composable
+private fun StorageLine(label: String, value: Long, suffix: String = "B") {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(label, modifier = Modifier.weight(1f))
+        Text(
+            if (suffix.isBlank()) value.toString() else formatBytes(value),
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun TrashDialog(vm: MusicViewModel, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Papierkorb") },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "Gelöschte Elemente bleiben hier, bis du sie endgültig entfernst.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
+                if (vm.trashTracks.isEmpty() && vm.trashPlaylists.isEmpty()) {
+                    Text("Der Papierkorb ist leer.", modifier = Modifier.padding(top = 18.dp))
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(430.dp),
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        items(vm.trashPlaylists, key = { "playlist:${it.name}:${it.deletedAt}" }) { item ->
+                            TrashRow(
+                                title = item.name,
+                                subtitle = "Playlist",
+                                coverPath = item.coverPath,
+                                onRestore = { vm.restoreTrashPlaylist(item.name) },
+                                onDelete = { vm.permanentlyDeleteTrashPlaylist(item.name) }
+                            )
+                        }
+                        items(vm.trashTracks, key = { "track:${it.track.id}" }) { item ->
+                            TrashRow(
+                                title = item.track.title,
+                                subtitle = item.track.artist,
+                                coverPath = item.track.coverPath,
+                                onRestore = { vm.restoreTrashTrack(item.track.id) },
+                                onDelete = { vm.permanentlyDeleteTrashTrack(item.track.id) }
+                            )
+                        }
+                    }
+                    TextButton(onClick = vm::emptyTrash, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.DeleteForever, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Papierkorb vollständig leeren")
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Schließen") } }
+    )
+}
+
+@Composable
+private fun TrashRow(
+    title: String,
+    subtitle: String,
+    coverPath: String?,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Cover(coverPath, 42)
+        Spacer(Modifier.width(9.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        TextButton(onClick = onRestore) { Text("Zurück") }
+        IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteForever, "Endgültig löschen") }
+    }
+}
+
+@Composable
+private fun RecommendationDialog(
+    track: AudioTrack,
+    onAgain: () -> Unit,
+    onPlay: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Was soll ich hören?") },
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Cover(track.coverPath, 72)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(track.title, fontWeight = FontWeight.Bold)
+                    Text(track.artist, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Aus weniger gehörten und zuletzt nicht gespielten Songs ausgewählt.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onPlay) { Text("Abspielen") } },
+        dismissButton = { TextButton(onClick = onAgain) { Text("Neu würfeln") } }
+    )
+}
+
+@Composable
+private fun DuplicateSongDialog(
+    candidate: DuplicateCandidate,
+    onAdd: () -> Unit,
+    onSkip: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("Doppelter Song erkannt") },
+        text = {
+            Column {
+                Text("Neu: ${candidate.track.title} – ${candidate.track.artist}")
+                Text(
+                    "Bereits vorhanden: ${candidate.existing.title} – ${candidate.existing.artist}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Text(
+                    "Soll der Song trotzdem ein zweites Mal hinzugefügt werden?",
+                    modifier = Modifier.padding(top = 12.dp)
+                )
+            }
+        },
+        confirmButton = { Button(onClick = onAdd) { Text("Trotzdem hinzufügen") } },
+        dismissButton = { TextButton(onClick = onSkip) { Text("Überspringen") } }
+    )
+}
+
+@Composable
+private fun PlaybackSpeedDialog(
+    selected: Float,
+    onSelect: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val speeds = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Wiedergabegeschwindigkeit") },
+        text = {
+            Column {
+                speeds.forEach { speed ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(speed); onDismiss() },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selected == speed,
+                            onClick = { onSelect(speed); onDismiss() }
+                        )
+                        Text("${formatSpeed(speed)}×")
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Schließen") } }
     )
 }
 
@@ -2384,6 +2862,16 @@ private fun PinLockScreen(vm: MusicViewModel) {
                 Spacer(Modifier.width(8.dp))
                 Text("Entsperren")
             }
+            if (vm.guestModeEnabled) {
+                TextButton(
+                    onClick = vm::enterGuestMode,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.LockOpen, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Als Gast öffnen")
+                }
+            }
         }
     }
 }
@@ -2516,6 +3004,38 @@ private fun SecurityDialog(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("PIN-Sperre deaktivieren")
+                    }
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { vm.setGuestModeEnabled(!vm.guestModeEnabled) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = vm.guestModeEnabled,
+                        onCheckedChange = vm::setGuestModeEnabled
+                    )
+                    Column {
+                        Text("Gastmodus erlauben", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Gäste können Musik abspielen und suchen, aber nichts ändern, " +
+                                "herunterladen, löschen oder sichern.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                if (vm.guestModeEnabled) {
+                    TextButton(
+                        onClick = {
+                            vm.enterGuestMode()
+                            onDismiss()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Gastmodus jetzt starten")
                     }
                 }
                 Text(
@@ -3317,16 +3837,16 @@ private fun DeleteSelectedSongsDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("$count Songs löschen?") },
+        title = { Text("$count Songs in den Papierkorb?") },
         text = {
             Text(
-                "Die ausgewählten Songs werden aus Kochify und aus allen Playlists entfernt. " +
-                    "Importierte oder heruntergeladene App-Dateien werden ebenfalls gelöscht."
+                "Die ausgewählten Songs werden aus Bibliothek und Playlists entfernt. " +
+                    "Du kannst sie später im Papierkorb wiederherstellen."
             )
         },
         confirmButton = {
             Button(onClick = onConfirm) {
-                Text("Songs löschen")
+                Text("In Papierkorb")
             }
         },
         dismissButton = {
@@ -3343,16 +3863,16 @@ private fun DeletePlaylistDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Playlist löschen?") },
+        title = { Text("Playlist in den Papierkorb?") },
         text = {
             Text(
-                "„$playlist“ wird gelöscht. Die enthaltenen Songs bleiben in " +
-                    "deiner Kochify-Bibliothek erhalten."
+                "„$playlist“ kann später im Papierkorb wiederhergestellt werden. " +
+                    "Die Songs bleiben in deiner Kochify-Bibliothek."
             )
         },
         confirmButton = {
             Button(onClick = onConfirm) {
-                Text("Playlist löschen")
+                Text("In Papierkorb")
             }
         },
         dismissButton = {

@@ -15,9 +15,11 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 internal data class BackupTrack(
+    val sourceId: String,
     val title: String,
     val artist: String,
     val favorite: Boolean,
+    val bookmarked: Boolean,
     val playlists: Set<String>,
     val audioPath: String?,
     val coverPath: String?
@@ -31,6 +33,13 @@ internal data class KochifyBackupImport(
     val shuffleEnabled: Boolean,
     val repeatOneEnabled: Boolean,
     val librarySort: LibrarySort,
+    val playbackSpeed: Float,
+    val includeStats: Boolean,
+    val totalListeningMs: Long,
+    val playCounts: Map<String, Int>,
+    val playbackHistory: List<PlaybackHistoryEntry>,
+    val monthlyListeningMs: Map<String, Long>,
+    val yearlyListeningMs: Map<String, Long>,
     val restoredAudioFiles: Int,
     val restoredSongCovers: Int,
     val restoredPlaylistCovers: Int,
@@ -39,7 +48,7 @@ internal data class KochifyBackupImport(
 
 internal object KochifyBackupManager {
     private const val FORMAT = "kochify-backup"
-    private const val BACKUP_VERSION = 3
+    private const val BACKUP_VERSION = 4
     private const val MANIFEST_ENTRY = "backup.json"
 
     fun export(
@@ -52,8 +61,15 @@ internal object KochifyBackupManager {
         shuffleEnabled: Boolean,
         repeatOneEnabled: Boolean,
         librarySort: LibrarySort,
+        playbackSpeed: Float,
         includeMusic: Boolean,
-        includeSettings: Boolean = true
+        includeSettings: Boolean = true,
+        includeStats: Boolean = includeMusic,
+        totalListeningMs: Long = 0L,
+        playCounts: Map<String, Int> = emptyMap(),
+        playbackHistory: List<PlaybackHistoryEntry> = emptyList(),
+        monthlyListeningMs: Map<String, Long> = emptyMap(),
+        yearlyListeningMs: Map<String, Long> = emptyMap()
     ): Int {
         val preparedTracks = tracks.map { track ->
             val audioFile = File(track.path).takeIf { includeMusic && it.isFile }
@@ -89,6 +105,26 @@ internal object KochifyBackupManager {
             put("shuffleEnabled", shuffleEnabled)
             put("repeatOneEnabled", repeatOneEnabled)
             put("librarySort", librarySort.name)
+            put("playbackSpeed", playbackSpeed.toDouble())
+            put("includeStats", includeStats)
+            if (includeStats) {
+                put("totalListeningMs", totalListeningMs)
+                put("playCounts", JSONObject().apply {
+                    playCounts.forEach { (trackId, count) -> put(trackId, count) }
+                })
+                put("playbackHistory", JSONArray().apply {
+                    playbackHistory.forEach { entry ->
+                        put(JSONObject().apply {
+                            put("trackId", entry.trackId)
+                            put("title", entry.title)
+                            put("artist", entry.artist)
+                            put("playedAt", entry.playedAt)
+                        })
+                    }
+                })
+                put("monthlyListeningMs", JSONObject(monthlyListeningMs))
+                put("yearlyListeningMs", JSONObject(yearlyListeningMs))
+            }
             put("playlists", JSONArray(playlists))
             put("playlistCovers", JSONObject().apply {
                 preparedPlaylistCovers.forEach { (name, entry, _) -> put(name, entry) }
@@ -96,9 +132,11 @@ internal object KochifyBackupManager {
             put("tracks", JSONArray().apply {
                 preparedTracks.forEach { (track, audio, cover) ->
                     put(JSONObject().apply {
+                        put("sourceId", track.id)
                         put("title", track.title)
                         put("artist", track.artist)
                         put("favorite", track.favorite)
+                        put("bookmarked", track.bookmarked)
                         put("playlists", JSONArray(track.playlists.toList()))
                         put("audioEntry", audio.first ?: "")
                         put("coverEntry", cover.first ?: "")
@@ -221,11 +259,13 @@ internal object KochifyBackupManager {
                     }
                 }
                 restoredTracks += BackupTrack(
+                    sourceId = item.optString("sourceId").ifBlank { restoredId },
                     title = item.optString("title").ifBlank { "Unbekannter Titel" },
                     artist = item.optString("artist").ifBlank {
                         "Unbekannter Interpret"
                     },
                     favorite = item.optBoolean("favorite"),
+                    bookmarked = item.optBoolean("bookmarked"),
                     playlists = itemPlaylists,
                     audioPath = audioTarget?.absolutePath,
                     coverPath = coverTarget?.absolutePath
@@ -284,6 +324,38 @@ internal object KochifyBackupManager {
             val restoredLibrarySort = runCatching {
                 LibrarySort.valueOf(root.optString("librarySort"))
             }.getOrDefault(LibrarySort.ADDED_NEWEST)
+            fun longMap(name: String): Map<String, Long> = buildMap {
+                val values = root.optJSONObject(name) ?: JSONObject()
+                val keys = values.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    values.optLong(key).takeIf { it > 0L }?.let { put(key, it) }
+                }
+            }
+            val restoredPlayCounts = buildMap<String, Int> {
+                val values = root.optJSONObject("playCounts") ?: JSONObject()
+                val keys = values.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    values.optInt(key).takeIf { it > 0 }?.let { put(key, it) }
+                }
+            }
+            val restoredHistory = buildList {
+                val values = root.optJSONArray("playbackHistory") ?: JSONArray()
+                repeat(values.length()) { index ->
+                    val item = values.optJSONObject(index) ?: return@repeat
+                    add(
+                        PlaybackHistoryEntry(
+                            trackId = item.optString("trackId"),
+                            title = item.optString("title").ifBlank { "Unbekannter Titel" },
+                            artist = item.optString("artist").ifBlank {
+                                "Unbekannter Interpret"
+                            },
+                            playedAt = item.optLong("playedAt")
+                        )
+                    )
+                }
+            }
             return KochifyBackupImport(
                 playlists = restoredPlaylists,
                 playlistCovers = restoredPlaylistCovers,
@@ -292,6 +364,13 @@ internal object KochifyBackupManager {
                 shuffleEnabled = root.optBoolean("shuffleEnabled"),
                 repeatOneEnabled = root.optBoolean("repeatOneEnabled"),
                 librarySort = restoredLibrarySort,
+                playbackSpeed = root.optDouble("playbackSpeed", 1.0).toFloat(),
+                includeStats = root.optBoolean("includeStats", false),
+                totalListeningMs = root.optLong("totalListeningMs"),
+                playCounts = restoredPlayCounts,
+                playbackHistory = restoredHistory,
+                monthlyListeningMs = longMap("monthlyListeningMs"),
+                yearlyListeningMs = longMap("yearlyListeningMs"),
                 restoredAudioFiles = restoredAudioFiles,
                 restoredSongCovers = restoredSongCovers,
                 restoredPlaylistCovers = restoredPlaylistCoverCount,
