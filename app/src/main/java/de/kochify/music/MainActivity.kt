@@ -24,6 +24,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -60,6 +61,8 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NavigateBefore
@@ -80,6 +83,7 @@ import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -123,6 +127,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -161,6 +167,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         musicViewModel.handleSpotifyCallback(intent.data)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        musicViewModel.onAppForegrounded()
+    }
+
+    override fun onStop() {
+        musicViewModel.onAppBackgrounded()
+        super.onStop()
     }
 
     private fun requestPlaybackNotificationPermission() {
@@ -293,10 +309,16 @@ private fun KochifyTheme(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MusicApp(vm: MusicViewModel) {
+    if (vm.appLocked) {
+        PinLockScreen(vm)
+        return
+    }
     var mode by remember { mutableStateOf(LibraryMode.ALL) }
     var showDownload by remember { mutableStateOf(false) }
     var showSpotifyImport by remember { mutableStateOf(false) }
     var showThemePicker by remember { mutableStateOf(false) }
+    var showLibrarySort by remember { mutableStateOf(false) }
+    var showSecurity by remember { mutableStateOf(false) }
     var showBackup by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
     var showLocalTransfer by remember { mutableStateOf(false) }
@@ -356,6 +378,7 @@ private fun MusicApp(vm: MusicViewModel) {
 
     val activeTrack = vm.currentTrack
     val hasOpenDialog = showDownload || showSpotifyImport || showThemePicker ||
+        showLibrarySort || showSecurity ||
         showBackup || showStats || showLocalTransfer || showBulkCover || showNewPlaylist ||
         showBulkPlaylistAssignment ||
         editingTrack != null || playlistTrack != null ||
@@ -471,6 +494,8 @@ private fun MusicApp(vm: MusicViewModel) {
                     onDownload = { showDownload = true },
                     onSpotifyImport = { showSpotifyImport = true },
                     onStats = { showStats = true },
+                    onSort = { showLibrarySort = true },
+                    onSecurity = { showSecurity = true },
                     onLocalTransfer = {
                         showLocalTransfer = true
                     },
@@ -572,6 +597,23 @@ private fun MusicApp(vm: MusicViewModel) {
             selected = vm.themeMode,
             onSelect = vm::selectThemeMode,
             onDismiss = { showThemePicker = false }
+        )
+    }
+    if (showLibrarySort) {
+        LibrarySortDialog(
+            selected = vm.librarySort,
+            onSelect = vm::selectLibrarySort,
+            onDismiss = { showLibrarySort = false }
+        )
+    }
+    if (showSecurity) {
+        SecurityDialog(
+            vm = vm,
+            onDismiss = { showSecurity = false },
+            onLockNow = {
+                showSecurity = false
+                vm.lockNow()
+            }
         )
     }
     if (showBackup) {
@@ -746,6 +788,8 @@ private fun Header(
     onDownload: () -> Unit,
     onSpotifyImport: () -> Unit,
     onStats: () -> Unit,
+    onSort: () -> Unit,
+    onSecurity: () -> Unit,
     onLocalTransfer: () -> Unit,
     onSharePlaylist: (String) -> Unit,
     onEditPlaylist: (String) -> Unit,
@@ -819,6 +863,16 @@ private fun Header(
                     expanded = toolsExpanded,
                     onDismissRequest = { toolsExpanded = false }
                 ) {
+                    if (mode == LibraryMode.ALL) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Bibliothek sortieren") },
+                            leadingIcon = { Icon(Icons.Default.Sort, null) },
+                            onClick = {
+                                toolsExpanded = false
+                                onSort()
+                            }
+                        )
+                    }
                     androidx.compose.material3.DropdownMenuItem(
                         text = { Text("Mehrere MP3s vom Handy auswählen") },
                         leadingIcon = { Icon(Icons.Default.LibraryMusic, null) },
@@ -849,6 +903,14 @@ private fun Header(
                         onClick = {
                             toolsExpanded = false
                             onLocalTransfer()
+                        }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Sicherheit & PIN") },
+                        leadingIcon = { Icon(Icons.Default.Lock, null) },
+                        onClick = {
+                            toolsExpanded = false
+                            onSecurity()
                         }
                     )
                 }
@@ -2213,6 +2275,265 @@ private fun ThemePickerDialog(
 }
 
 @Composable
+private fun LibrarySortDialog(
+    selected: LibrarySort,
+    onSelect: (LibrarySort) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val options = listOf(
+        LibrarySort.ADDED_NEWEST to "Hinzufügungsdatum: Neu nach Alt",
+        LibrarySort.ADDED_OLDEST to "Hinzufügungsdatum: Alt nach Neu",
+        LibrarySort.TITLE_AZ to "Alphabetisch: A bis Z",
+        LibrarySort.TITLE_ZA to "Alphabetisch: Z bis A"
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Bibliothek sortieren") },
+        text = {
+            Column {
+                options.forEach { (sort, title) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSelect(sort)
+                                onDismiss()
+                            }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selected == sort,
+                            onClick = {
+                                onSelect(sort)
+                                onDismiss()
+                            }
+                        )
+                        Text(title)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Schließen") }
+        }
+    )
+}
+
+@Composable
+private fun PinLockScreen(vm: MusicViewModel) {
+    var pin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    BackHandler(enabled = true) {}
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(28.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                Icons.Default.Lock,
+                null,
+                modifier = Modifier.size(64.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(18.dp))
+            Text("Kochify ist gesperrt", fontSize = 26.sp, fontWeight = FontWeight.Black)
+            Text(
+                "Gib deine PIN ein, um die App zu öffnen.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(vertical = 12.dp)
+            )
+            OutlinedTextField(
+                value = pin,
+                onValueChange = {
+                    if (it.length <= 8 && it.all(Char::isDigit)) pin = it
+                    error = null
+                },
+                label = { Text("PIN") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+            )
+            error?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            Button(
+                onClick = {
+                    if (!vm.unlockWithPin(pin)) {
+                        error = "Falsche PIN."
+                        pin = ""
+                    }
+                },
+                enabled = pin.length >= 4,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 18.dp)
+            ) {
+                Icon(Icons.Default.LockOpen, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Entsperren")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SecurityDialog(
+    vm: MusicViewModel,
+    onDismiss: () -> Unit,
+    onLockNow: () -> Unit
+) {
+    var currentPin by remember { mutableStateOf("") }
+    var newPin by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf<String?>(null) }
+    fun digitsOnly(value: String): String = value.filter(Char::isDigit).take(8)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sicherheit & PIN") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    if (vm.pinEnabled) {
+                        "Die PIN-Sperre ist aktiviert. Nach 15 Sekunden im Hintergrund wird " +
+                            "Kochify beim Zurückkehren gesperrt."
+                    } else {
+                        "Die PIN-Sperre ist deaktiviert. Lege eine PIN mit 4 bis 8 Ziffern fest."
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (vm.pinEnabled) {
+                    OutlinedTextField(
+                        value = currentPin,
+                        onValueChange = { currentPin = digitsOnly(it); message = null },
+                        label = { Text("Bisherige PIN") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.NumberPassword
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                    )
+                }
+                OutlinedTextField(
+                    value = newPin,
+                    onValueChange = { newPin = digitsOnly(it); message = null },
+                    label = { Text(if (vm.pinEnabled) "Neue PIN" else "PIN") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+                OutlinedTextField(
+                    value = confirmation,
+                    onValueChange = { confirmation = digitsOnly(it); message = null },
+                    label = { Text("PIN wiederholen") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+                message?.let {
+                    Text(
+                        it,
+                        color = if (it.startsWith("PIN-Sperre") || it.startsWith("PIN geändert")) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                        modifier = Modifier.padding(top = 10.dp)
+                    )
+                }
+                Button(
+                    onClick = {
+                        val wasEnabled = vm.pinEnabled
+                        val result = if (wasEnabled) {
+                            vm.changePin(currentPin, newPin, confirmation)
+                        } else {
+                            vm.enablePin(newPin, confirmation)
+                        }
+                        message = result ?: if (wasEnabled) {
+                            "PIN geändert."
+                        } else {
+                            "PIN-Sperre aktiviert."
+                        }
+                        if (result == null) {
+                            currentPin = ""
+                            newPin = ""
+                            confirmation = ""
+                        }
+                    },
+                    enabled = newPin.isNotBlank() && confirmation.isNotBlank(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 14.dp)
+                ) {
+                    Text(if (vm.pinEnabled) "PIN ändern" else "PIN-Sperre aktivieren")
+                }
+                if (vm.pinEnabled) {
+                    TextButton(
+                        onClick = onLockNow,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Lock, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("App jetzt sperren")
+                    }
+                    TextButton(
+                        onClick = {
+                            if (vm.disablePin(currentPin)) {
+                                message = "PIN-Sperre deaktiviert."
+                                currentPin = ""
+                                newPin = ""
+                                confirmation = ""
+                            } else {
+                                message = "Die bisherige PIN ist falsch."
+                            }
+                        },
+                        enabled = currentPin.length >= 4,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("PIN-Sperre deaktivieren")
+                    }
+                }
+                Text(
+                    "Die PIN wird nicht in Kochify-Sicherungen gespeichert. Bei vergessener " +
+                        "PIN müssen die App-Daten über Android zurückgesetzt werden.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Schließen") }
+        }
+    )
+}
+
+@Composable
 private fun ThemeOption(
     mode: KochifyThemeMode,
     selected: Boolean,
@@ -2931,8 +3252,12 @@ private fun PlaylistAssignmentDialog(
             if (playlists.isEmpty()) {
                 Text("Erstelle zuerst eine Playlist.")
             } else {
-                Column {
-                    playlists.forEach { playlist ->
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(440.dp)
+                ) {
+                    items(playlists, key = { "single-playlist-$it" }) { playlist ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()

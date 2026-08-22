@@ -2,7 +2,11 @@ package de.kochify.music
 
 import android.app.Application
 import android.content.ClipData
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Environment
@@ -20,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -108,6 +113,13 @@ enum class KochifyThemeMode {
     GERMANY
 }
 
+enum class LibrarySort {
+    ADDED_NEWEST,
+    ADDED_OLDEST,
+    TITLE_AZ,
+    TITLE_ZA
+}
+
 private data class YoutubeDownloadItem(
     val id: String,
     val title: String,
@@ -136,6 +148,7 @@ private const val SPOTIFY_REDIRECT_URI = "kochify://spotify-callback"
 private const val YTDLP_UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L
 private const val LOCAL_TRANSFER_MAGIC = "KOCHIFY_LOCAL_1"
 private const val LOCAL_TRANSFER_MAX_BYTES = 8L * 1024L * 1024L * 1024L
+private const val PIN_BACKGROUND_LOCK_DELAY_MS = 15_000L
 
 private class SpotifyHttpException(
     val statusCode: Int,
@@ -183,6 +196,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val playbackBackStack = mutableListOf<PlaybackNavigationEntry>()
     private var activeListeningStartedAt = 0L
     private var transferServer: ServerSocket? = null
+    private var backgroundedAtElapsedMs = 0L
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && player.isPlaying) {
+                player.pause()
+            }
+        }
+    }
 
     var search by mutableStateOf("")
     var selectedPlaylist by mutableStateOf<String?>(null)
@@ -204,6 +225,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }.getOrDefault(KochifyThemeMode.BLACK)
     )
         private set
+    var librarySort by mutableStateOf(
+        runCatching {
+            LibrarySort.valueOf(
+                prefs.getString("library_sort", LibrarySort.ADDED_NEWEST.name).orEmpty()
+            )
+        }.getOrDefault(LibrarySort.ADDED_NEWEST)
+    )
+        private set
+    var pinEnabled by mutableStateOf(prefs.getBoolean("pin_enabled", false))
+        private set
+    var appLocked by mutableStateOf(pinEnabled)
+        private set
     var downloadProgress by mutableFloatStateOf(0f)
     var downloadStatus by mutableStateOf<String?>(null)
     var isDownloading by mutableStateOf(false)
@@ -223,6 +256,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     init {
         load()
         scanDownloadedFiles()
+        ContextCompat.registerReceiver(
+            app,
+            becomingNoisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_EXPORTED
+        )
         player.repeatMode =
             if (repeatOneEnabled) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         player.addListener(object : Player.Listener {
@@ -283,6 +322,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val themeSnapshot = themeMode
         val shuffleSnapshot = shuffleEnabled
         val repeatSnapshot = repeatOneEnabled
+        val librarySortSnapshot = librarySort
         isBackupBusy = true
         backupStatus = if (includeMusic) {
             "Komplettsicherung wird erstellt …"
@@ -300,6 +340,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     themeMode = themeSnapshot,
                     shuffleEnabled = shuffleSnapshot,
                     repeatOneEnabled = repeatSnapshot,
+                    librarySort = librarySortSnapshot,
                     includeMusic = includeMusic
                 )
                 withContext(Dispatchers.Main) {
@@ -725,16 +766,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         isDownloading = true
         downloadProgress = 0f
         downloadStatus = "Download wird vorbereitet …"
+        runCatching {
+            DownloadKeepAliveService.start(app, requireNotNull(downloadStatus))
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 withContext(Dispatchers.Main) {
                     downloadStatus = "Download-Modul wird gestartet …"
+                    DownloadKeepAliveService.update(
+                        app,
+                        requireNotNull(downloadStatus),
+                        downloadProgress
+                    )
                 }
                 ensureDownloaderReady()
                 updateDownloaderIfNeeded()
                 withContext(Dispatchers.Main) {
                     downloadStatus = "YouTube-Link wird analysiert …"
+                    DownloadKeepAliveService.update(
+                        app,
+                        requireNotNull(downloadStatus),
+                        downloadProgress
+                    )
                 }
                 val plan = createYoutubeDownloadPlan(cleanUrl)
                 val playlistName = plan.title.takeIf { plan.isPlaylist }
@@ -781,6 +835,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 append(" ${plan.unavailableItems} nicht verfügbar.")
                             }
                         }
+                        DownloadKeepAliveService.update(
+                            app,
+                            requireNotNull(downloadStatus),
+                            downloadProgress
+                        )
                     }
                 }
 
@@ -797,6 +856,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         } else {
                             "Wird heruntergeladen: ${item.title}"
                         }
+                        DownloadKeepAliveService.update(
+                            app,
+                            requireNotNull(downloadStatus),
+                            downloadProgress
+                        )
                     }
 
                     try {
@@ -826,6 +890,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 } else {
                                     "Wird heruntergeladen: ${progress.toInt()} %$etaText"
                                 }
+                                DownloadKeepAliveService.update(
+                                    app,
+                                    requireNotNull(downloadStatus),
+                                    downloadProgress
+                                )
                             }
                         }
 
@@ -869,13 +938,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         reused = reused,
                         failures = failures
                     )
+                    DownloadKeepAliveService.update(
+                        app,
+                        requireNotNull(downloadStatus),
+                        downloadProgress
+                    )
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     downloadStatus = "Download fehlgeschlagen: ${compactDownloadError(e)}"
+                    DownloadKeepAliveService.update(
+                        app,
+                        requireNotNull(downloadStatus),
+                        downloadProgress
+                    )
                 }
             } finally {
-                withContext(Dispatchers.Main) { isDownloading = false }
+                withContext(Dispatchers.Main) {
+                    isDownloading = false
+                    DownloadKeepAliveService.stop(app)
+                }
             }
         }
     }
@@ -1140,6 +1222,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             themeMode = theme,
             shuffleEnabled = shuffle,
             repeatOneEnabled = repeat,
+            librarySort = librarySort,
             includeMusic = true,
             includeSettings = false
         )
@@ -1697,6 +1780,100 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString("theme_mode", mode.name).apply()
     }
 
+    fun selectLibrarySort(sort: LibrarySort) {
+        librarySort = sort
+        prefs.edit().putString("library_sort", sort.name).apply()
+    }
+
+    fun enablePin(pin: String, confirmation: String): String? {
+        val validation = validateNewPin(pin, confirmation)
+        if (validation != null) return validation
+        savePin(pin)
+        pinEnabled = true
+        appLocked = false
+        return null
+    }
+
+    fun changePin(currentPin: String, newPin: String, confirmation: String): String? {
+        if (!verifyPin(currentPin)) return "Die bisherige PIN ist falsch."
+        val validation = validateNewPin(newPin, confirmation)
+        if (validation != null) return validation
+        savePin(newPin)
+        appLocked = false
+        return null
+    }
+
+    fun disablePin(currentPin: String): Boolean {
+        if (!verifyPin(currentPin)) return false
+        prefs.edit()
+            .remove("pin_hash")
+            .remove("pin_salt")
+            .putBoolean("pin_enabled", false)
+            .apply()
+        pinEnabled = false
+        appLocked = false
+        backgroundedAtElapsedMs = 0L
+        return true
+    }
+
+    fun unlockWithPin(pin: String): Boolean {
+        if (!pinEnabled || verifyPin(pin)) {
+            appLocked = false
+            backgroundedAtElapsedMs = 0L
+            return true
+        }
+        return false
+    }
+
+    fun lockNow() {
+        if (pinEnabled) appLocked = true
+    }
+
+    fun onAppBackgrounded() {
+        if (pinEnabled && !appLocked) {
+            backgroundedAtElapsedMs = SystemClock.elapsedRealtime()
+        }
+    }
+
+    fun onAppForegrounded() {
+        if (!pinEnabled || appLocked || backgroundedAtElapsedMs == 0L) return
+        if (SystemClock.elapsedRealtime() - backgroundedAtElapsedMs >=
+            PIN_BACKGROUND_LOCK_DELAY_MS
+        ) {
+            appLocked = true
+        }
+        backgroundedAtElapsedMs = 0L
+    }
+
+    private fun validateNewPin(pin: String, confirmation: String): String? = when {
+        !pin.matches(Regex("\\d{4,8}")) -> "Die PIN muss aus 4 bis 8 Ziffern bestehen."
+        pin != confirmation -> "Die beiden PIN-Eingaben stimmen nicht überein."
+        else -> null
+    }
+
+    private fun savePin(pin: String) {
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val hash = pinHash(pin, salt)
+        prefs.edit()
+            .putString("pin_salt", Base64.encodeToString(salt, Base64.NO_WRAP))
+            .putString("pin_hash", Base64.encodeToString(hash, Base64.NO_WRAP))
+            .putBoolean("pin_enabled", true)
+            .apply()
+    }
+
+    private fun verifyPin(pin: String): Boolean = runCatching {
+        val salt = Base64.decode(prefs.getString("pin_salt", ""), Base64.NO_WRAP)
+        val expected = Base64.decode(prefs.getString("pin_hash", ""), Base64.NO_WRAP)
+        salt.isNotEmpty() && expected.isNotEmpty() &&
+            MessageDigest.isEqual(expected, pinHash(pin, salt))
+    }.getOrDefault(false)
+
+    private fun pinHash(pin: String, salt: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").apply {
+            update(salt)
+            update(pin.toByteArray(StandardCharsets.UTF_8))
+        }.digest()
+
     fun playbackStats(): PlaybackStats {
         val top = playCounts.entries
             .sortedByDescending { it.value }
@@ -2093,7 +2270,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val positions = order.withIndex().associate { it.value to it.index }
             filtered.sortedBy { positions[it.id] ?: Int.MAX_VALUE }
         } else {
-            filtered
+            when (librarySort) {
+                LibrarySort.ADDED_NEWEST -> filtered.sortedByDescending { tracks.indexOf(it) }
+                LibrarySort.ADDED_OLDEST -> filtered.sortedBy { tracks.indexOf(it) }
+                LibrarySort.TITLE_AZ -> filtered.sortedBy { it.title.lowercase() }
+                LibrarySort.TITLE_ZA -> filtered.sortedByDescending { it.title.lowercase() }
+            }
         }
     }
 
@@ -2298,6 +2480,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             themeMode = imported.themeMode
             shuffleEnabled = imported.shuffleEnabled
             repeatOneEnabled = imported.repeatOneEnabled
+            librarySort = imported.librarySort
             player.repeatMode = if (repeatOneEnabled) {
                 Player.REPEAT_MODE_ONE
             } else {
@@ -2307,6 +2490,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 .putString("theme_mode", themeMode.name)
                 .putBoolean("shuffle_enabled", shuffleEnabled)
                 .putBoolean("repeat_one_enabled", repeatOneEnabled)
+                .putString("library_sort", librarySort.name)
                 .apply()
         }
         save()
@@ -2499,6 +2683,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         updateListeningSession(false)
         closeLocalTransfer()
         PlaybackCommandBridge.unregister()
+        runCatching { app.unregisterReceiver(becomingNoisyReceiver) }
+        DownloadKeepAliveService.stop(app)
         player.release()
         PlaybackKeepAliveService.stop(app)
         super.onCleared()

@@ -17,6 +17,11 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - fest sichtbares Mehrfachaktionsmenü für Playlist-Zuordnung, neue Playlists, Löschen, Teilen und QR-Übertragung
 - Shuffle-Zyklen ohne Wiederholung, bis jeder Song der Wiedergabeliste gespielt wurde
 - echter Wiedergabeverlauf: „Vorheriger Song“ funktioniert auch bei aktivem Shuffle und startet den Titel von vorn
+- scrollbare Playlist-Auswahl auch bei sehr vielen Playlists
+- Bibliothekssortierung nach Hinzufügungsreihenfolge sowie alphabetisch in beide Richtungen
+- automatische Pause, sobald Bluetooth-Kopfhörer oder ein anderes Audioausgabegerät getrennt werden
+- zuverlässige YouTube-Downloads im Hintergrund mit eigener Fortschrittsbenachrichtigung
+- optionale lokale PIN-Sperre mit gesalzener Prüfsumme, standardmäßig deaktiviert
 - Cyberpunk- und Deutschland-Design sowie ein stärker animierter RGB-Modus
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
 - Download einzelner eigener/freigegebener Videos oder kompletter Playlists als MP3

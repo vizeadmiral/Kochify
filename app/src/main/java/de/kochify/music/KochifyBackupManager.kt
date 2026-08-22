@@ -30,6 +30,7 @@ internal data class KochifyBackupImport(
     val themeMode: KochifyThemeMode,
     val shuffleEnabled: Boolean,
     val repeatOneEnabled: Boolean,
+    val librarySort: LibrarySort,
     val restoredAudioFiles: Int,
     val restoredSongCovers: Int,
     val restoredPlaylistCovers: Int,
@@ -50,6 +51,7 @@ internal object KochifyBackupManager {
         themeMode: KochifyThemeMode,
         shuffleEnabled: Boolean,
         repeatOneEnabled: Boolean,
+        librarySort: LibrarySort,
         includeMusic: Boolean,
         includeSettings: Boolean = true
     ): Int {
@@ -86,6 +88,7 @@ internal object KochifyBackupManager {
             put("themeMode", themeMode.name)
             put("shuffleEnabled", shuffleEnabled)
             put("repeatOneEnabled", repeatOneEnabled)
+            put("librarySort", librarySort.name)
             put("playlists", JSONArray(playlists))
             put("playlistCovers", JSONObject().apply {
                 preparedPlaylistCovers.forEach { (name, entry, _) -> put(name, entry) }
@@ -278,6 +281,9 @@ internal object KochifyBackupManager {
             val restoredTheme = runCatching {
                 KochifyThemeMode.valueOf(root.optString("themeMode"))
             }.getOrDefault(KochifyThemeMode.BLACK)
+            val restoredLibrarySort = runCatching {
+                LibrarySort.valueOf(root.optString("librarySort"))
+            }.getOrDefault(LibrarySort.ADDED_NEWEST)
             return KochifyBackupImport(
                 playlists = restoredPlaylists,
                 playlistCovers = restoredPlaylistCovers,
@@ -285,6 +291,7 @@ internal object KochifyBackupManager {
                 themeMode = restoredTheme,
                 shuffleEnabled = root.optBoolean("shuffleEnabled"),
                 repeatOneEnabled = root.optBoolean("repeatOneEnabled"),
+                librarySort = restoredLibrarySort,
                 restoredAudioFiles = restoredAudioFiles,
                 restoredSongCovers = restoredSongCovers,
                 restoredPlaylistCovers = restoredPlaylistCoverCount,
