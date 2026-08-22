@@ -1869,7 +1869,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         update(id) { it.copy(bookmarked = !it.bookmarked) }
     }
 
-    fun setGuestModeEnabled(enabled: Boolean) {
+    fun configureGuestMode(enabled: Boolean) {
         if (enabled && !pinEnabled) return
         guestModeEnabled = enabled
         prefs.edit().putBoolean("guest_mode_enabled", enabled).apply()

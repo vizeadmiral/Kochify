@@ -3010,12 +3010,12 @@ private fun SecurityDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { vm.setGuestModeEnabled(!vm.guestModeEnabled) },
+                        .clickable { vm.configureGuestMode(!vm.guestModeEnabled) },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Checkbox(
                         checked = vm.guestModeEnabled,
-                        onCheckedChange = vm::setGuestModeEnabled
+                        onCheckedChange = vm::configureGuestMode
                     )
                     Column {
                         Text("Gastmodus erlauben", fontWeight = FontWeight.Bold)
