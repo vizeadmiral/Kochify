@@ -607,8 +607,10 @@ private fun MusicApp(vm: MusicViewModel) {
             downloading = vm.isDownloading,
             progress = vm.downloadProgress,
             status = vm.downloadStatus,
-            onDismiss = { if (!vm.isDownloading) showDownload = false },
-            onDownload = vm::downloadFromYoutube
+            queue = vm.youtubeDownloadQueue,
+            onDismiss = { showDownload = false },
+            onDownload = vm::downloadFromYoutube,
+            onRemoveQueued = vm::removeQueuedYoutubeDownload
         )
     }
     if (showSpotifyImport) {
@@ -3096,8 +3098,10 @@ private fun DownloadDialog(
     downloading: Boolean,
     progress: Float,
     status: String?,
+    queue: List<YoutubeDownloadQueueItem>,
     onDismiss: () -> Unit,
-    onDownload: (String, Boolean, Uri?) -> Unit
+    onDownload: (String, Boolean, Uri?) -> Boolean,
+    onRemoveQueued: (String) -> Unit
 ) {
     var url by remember { mutableStateOf("") }
     var confirmed by remember { mutableStateOf(false) }
@@ -3117,7 +3121,7 @@ private fun DownloadDialog(
         onDismissRequest = onDismiss,
         title = { Text("YouTube als MP3 herunterladen") },
         text = {
-            Column {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "Einzelne Videos oder vollständige Playlists. Kochify erstellt für eine " +
                         "YouTube-Playlist automatisch eine gleichnamige Playlist.",
@@ -3134,14 +3138,12 @@ private fun DownloadDialog(
                     value = url,
                     onValueChange = { url = it },
                     label = { Text("YouTube-Link") },
-                    enabled = !downloading,
                     singleLine = true
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
                         checked = confirmed,
-                        onCheckedChange = { confirmed = it },
-                        enabled = !downloading
+                        onCheckedChange = { confirmed = it }
                     )
                     Text("Ich besitze die nötigen Rechte.")
                 }
@@ -3153,7 +3155,7 @@ private fun DownloadDialog(
                 DownloadCoverOption(
                     selected = coverMode == DownloadCoverMode.YOUTUBE,
                     title = "YouTube-Thumbnails übernehmen",
-                    enabled = !downloading,
+                    enabled = true,
                     onSelect = { coverMode = DownloadCoverMode.YOUTUBE }
                 )
                 DownloadCoverOption(
@@ -3163,7 +3165,7 @@ private fun DownloadDialog(
                     } else {
                         "Eigenes Cover ausgewählt"
                     },
-                    enabled = !downloading,
+                    enabled = true,
                     onSelect = {
                         coverMode = DownloadCoverMode.CUSTOM
                         if (customCoverUri == null) customCoverPicker.launch("image/*")
@@ -3171,8 +3173,7 @@ private fun DownloadDialog(
                 )
                 if (coverMode == DownloadCoverMode.CUSTOM) {
                     TextButton(
-                        onClick = { customCoverPicker.launch("image/*") },
-                        enabled = !downloading
+                        onClick = { customCoverPicker.launch("image/*") }
                     ) {
                         Icon(Icons.Default.Photo, null)
                         Spacer(Modifier.width(6.dp))
@@ -3184,10 +3185,16 @@ private fun DownloadDialog(
                 DownloadCoverOption(
                     selected = coverMode == DownloadCoverMode.NONE,
                     title = "Ohne Cover herunterladen",
-                    enabled = !downloading,
+                    enabled = true,
                     onSelect = { coverMode = DownloadCoverMode.NONE }
                 )
                 if (downloading) {
+                    Text(
+                        "Du kannst oben weitere Links eingeben und zur Warteschlange hinzufügen.",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
                     LinearProgressIndicator(
                         progress = { progress },
                         modifier = Modifier
@@ -3207,25 +3214,77 @@ private fun DownloadDialog(
                         fontSize = 13.sp
                     )
                 }
+                if (queue.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Download-Warteschlange (${queue.size})",
+                        fontWeight = FontWeight.Bold
+                    )
+                    queue.forEachIndexed { index, item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (downloading && index == 0) {
+                                    Icons.Default.Download
+                                } else {
+                                    Icons.Default.QueueMusic
+                                },
+                                contentDescription = null,
+                                tint = if (downloading && index == 0) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    item.title,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    if (downloading && index == 0) {
+                                        "Wird verarbeitet"
+                                    } else {
+                                        "Wartet"
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            if (!downloading || index > 0) {
+                                IconButton(onClick = { onRemoveQueued(item.id) }) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        "Aus Warteschlange entfernen"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    onDownload(
+                    val accepted = onDownload(
                         url,
                         coverMode == DownloadCoverMode.YOUTUBE,
                         customCoverUri.takeIf { coverMode == DownloadCoverMode.CUSTOM }
                     )
+                    if (accepted) url = ""
                 },
-                enabled = confirmed && url.isNotBlank() && !downloading &&
+                enabled = confirmed && url.isNotBlank() &&
                     (coverMode != DownloadCoverMode.CUSTOM || customCoverUri != null)
             ) {
                 if (downloading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp
-                    )
+                    Text("Zur Warteschlange")
                 } else {
                     Text(
                         if (looksLikePlaylist) {
@@ -3238,7 +3297,7 @@ private fun DownloadDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !downloading) { Text("Schließen") }
+            TextButton(onClick = onDismiss) { Text("Schließen") }
         }
     )
 }

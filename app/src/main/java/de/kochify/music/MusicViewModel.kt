@@ -141,6 +141,14 @@ data class LocalTransferOffer(
     val qrPayload: String
 )
 
+data class YoutubeDownloadQueueItem(
+    val id: String,
+    val url: String,
+    val title: String,
+    val useYoutubeCovers: Boolean,
+    val customCoverUri: Uri?
+)
+
 enum class KochifyThemeMode {
     BLACK,
     LIGHT,
@@ -220,6 +228,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val trashTracks = mutableStateListOf<TrashTrack>()
     val trashPlaylists = mutableStateListOf<TrashPlaylist>()
     val pendingDuplicates = mutableStateListOf<DuplicateCandidate>()
+    val youtubeDownloadQueue = mutableStateListOf<YoutubeDownloadQueueItem>()
     val player = ExoPlayer.Builder(app).build().apply {
         setAudioAttributes(
             AudioAttributes.Builder()
@@ -822,13 +831,50 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         url: String,
         useYoutubeCovers: Boolean = true,
         customCoverUri: Uri? = null
-    ) {
-        if (url.isBlank() || isDownloading || guestMode) return
+    ): Boolean {
+        if (url.isBlank() || guestMode) return false
         val cleanUrl = url.trim()
         if (!isYoutubeUrl(cleanUrl)) {
             downloadStatus = "Bitte einen gültigen YouTube- oder YouTube-Music-Link eingeben."
-            return
+            return false
         }
+        if (youtubeDownloadQueue.any { it.url == cleanUrl }) {
+            downloadStatus = "Dieser Link befindet sich bereits in der Warteschlange."
+            return false
+        }
+
+        youtubeDownloadQueue += YoutubeDownloadQueueItem(
+            id = UUID.randomUUID().toString(),
+            url = cleanUrl,
+            title = cleanUrl,
+            useYoutubeCovers = useYoutubeCovers,
+            customCoverUri = customCoverUri
+        )
+        if (isDownloading) {
+            val waiting = (youtubeDownloadQueue.size - 1).coerceAtLeast(1)
+            Toast.makeText(
+                app,
+                "Zur Warteschlange hinzugefügt ($waiting wartend).",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            startNextYoutubeDownload()
+        }
+        return true
+    }
+
+    fun removeQueuedYoutubeDownload(id: String) {
+        val index = youtubeDownloadQueue.indexOfFirst { it.id == id }
+        if (index < 0 || (isDownloading && index == 0)) return
+        youtubeDownloadQueue.removeAt(index)
+    }
+
+    private fun startNextYoutubeDownload() {
+        if (isDownloading || youtubeDownloadQueue.isEmpty()) return
+        val queueItem = youtubeDownloadQueue.first()
+        val cleanUrl = queueItem.url
+        val useYoutubeCovers = queueItem.useYoutubeCovers
+        val customCoverUri = queueItem.customCoverUri
         isDownloading = true
         downloadProgress = 0f
         downloadStatus = "Download wird vorbereitet …"
@@ -857,6 +903,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 val plan = createYoutubeDownloadPlan(cleanUrl)
+                withContext(Dispatchers.Main) {
+                    val queueIndex = youtubeDownloadQueue.indexOfFirst { it.id == queueItem.id }
+                    if (queueIndex >= 0) {
+                        youtubeDownloadQueue[queueIndex] = queueItem.copy(title = plan.title)
+                    }
+                }
                 val playlistName = plan.title.takeIf { plan.isPlaylist }
                 val targetDir = File(
                     downloadDir,
@@ -911,6 +963,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
                 var completed = 0
                 var reused = 0
+                var normalizationWarnings = 0
                 val failures = mutableListOf<String>()
                 plan.items.forEachIndexed { index, item ->
                     val itemNumber = index + 1
@@ -934,10 +987,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             addOption("--extract-audio")
                             addOption("--audio-format", "mp3")
                             addOption("--audio-quality", "0")
-                            addOption(
-                                "--postprocessor-args",
-                                "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1.5"
-                            )
                             addOption("--embed-metadata")
                             addOption("--embed-thumbnail")
                             addOption("--no-playlist")
@@ -976,8 +1025,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             findExistingDownload(after, item)
                         }
                         if (itemFiles.isEmpty()) {
-                            failures += item.title
+                            failures += "${item.title}: Keine MP3-Datei erzeugt"
                         } else {
+                            if (newFiles.isNotEmpty()) {
+                                withContext(Dispatchers.Main) {
+                                    downloadStatus = "Lautstärke wird angeglichen …\n${item.title}"
+                                    DownloadKeepAliveService.update(
+                                        app,
+                                        requireNotNull(downloadStatus),
+                                        downloadProgress
+                                    )
+                                }
+                                newFiles.forEach { file ->
+                                    if (!normalizeMp3BestEffort(file)) normalizationWarnings++
+                                }
+                            }
                             val itemKey = stableKey(item.id.ifBlank { item.url })
                             val coverPath = when {
                                 customCoverUri != null -> copyLocalCover(
@@ -995,8 +1057,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             itemFiles.forEach { addFile(it, playlistName, coverPath) }
                             if (newFiles.isEmpty()) reused++ else completed++
                         }
-                    } catch (_: Exception) {
-                        failures += item.title
+                    } catch (e: Exception) {
+                        failures += "${item.title}: ${compactDownloadError(e)}"
                     }
                 }
 
@@ -1006,6 +1068,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         plan = plan,
                         completed = completed,
                         reused = reused,
+                        normalizationWarnings = normalizationWarnings,
                         failures = failures
                     )
                     DownloadKeepAliveService.update(
@@ -1025,8 +1088,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 withContext(Dispatchers.Main) {
+                    youtubeDownloadQueue.removeAll { it.id == queueItem.id }
                     isDownloading = false
-                    DownloadKeepAliveService.stop(app)
+                    if (youtubeDownloadQueue.isNotEmpty()) {
+                        startNextYoutubeDownload()
+                    } else {
+                        DownloadKeepAliveService.stop(app)
+                    }
                 }
             }
         }
@@ -1376,6 +1444,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         plan: YoutubeDownloadPlan,
         completed: Int,
         reused: Int,
+        normalizationWarnings: Int,
         failures: List<String>
     ): String = buildString {
         if (plan.isPlaylist) {
@@ -1383,6 +1452,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         append("$completed neu")
         if (reused > 0) append(", $reused bereits vorhanden")
+        if (normalizationWarnings > 0) {
+            append(", $normalizationWarnings ohne Lautstärke-Anpassung")
+        }
         if (plan.unavailableItems > 0) {
             append(", ${plan.unavailableItems} nicht verfügbar")
         }
@@ -1392,6 +1464,47 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (failures.size > 3) append(" …")
         } else {
             append(".")
+        }
+    }
+
+    private fun normalizeMp3BestEffort(file: File): Boolean {
+        val ffmpegBinary = File(
+            app.noBackupFilesDir,
+            "youtubedl-android/packages/ffmpeg/ffmpeg"
+        )
+        if (!ffmpegBinary.isFile || !file.isFile) return false
+        val normalized = File(app.cacheDir, "kochify-normalized-${UUID.randomUUID()}.mp3")
+        return try {
+            val process = ProcessBuilder(
+                ffmpegBinary.absolutePath,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                file.absolutePath,
+                "-map",
+                "0:a:0",
+                "-map_metadata",
+                "0",
+                "-af",
+                "loudnorm=I=-14:LRA=11:TP=-1.5",
+                "-codec:a",
+                "libmp3lame",
+                "-q:a",
+                "0",
+                normalized.absolutePath
+            )
+                .redirectErrorStream(true)
+                .start()
+            process.inputStream.bufferedReader().use { it.readText() }
+            val success = process.waitFor() == 0 && normalized.length() > 0L
+            if (success) normalized.copyTo(file, overwrite = true)
+            success
+        } catch (_: Exception) {
+            false
+        } finally {
+            normalized.delete()
         }
     }
 

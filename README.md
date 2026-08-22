@@ -21,6 +21,8 @@ Android-Musikplayer im dunklen Streaming-Stil mit:
 - Bibliothekssortierung nach Hinzufügungsreihenfolge sowie alphabetisch in beide Richtungen
 - automatische Pause, sobald Bluetooth-Kopfhörer oder ein anderes Audioausgabegerät getrennt werden
 - zuverlässige YouTube-Downloads im Hintergrund mit eigener Fortschrittsbenachrichtigung
+- sichtbare Download-Warteschlange für weitere Links während eines laufenden Downloads
+- fehlertolerante Lautstärke-Normalisierung, die eine fertige MP3 niemals verwirft
 - optionale lokale PIN-Sperre mit gesalzener Prüfsumme, standardmäßig deaktiviert
 - Cyberpunk- und Deutschland-Design sowie ein stärker animierter RGB-Modus
 - Übernahme eigener und gemeinsam bearbeiteter Spotify-Playlists
